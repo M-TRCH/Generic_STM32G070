@@ -20,14 +20,17 @@ constexpr uint8_t kDisplayAddress = 0x3C;
 #define ENABLE_PZEM017_SOC 1
 #define ENABLE_SOLID_COLOR_TEST 0
 #define ENABLE_RAINBOW_ANIMATION 0
+#define ENABLE_PYTHON_JSON_OUTPUT 1
+
+#define SOC_BATTERY_CAPACITY_AH   18.0f
+#define SOC_CHARGE_MAX_VOLTAGE    29.2f
+#define SOC_FULL_REST_VOLTAGE     28.7f
+#define SOC_EMPTY_VOLTAGE         20.5f
 
 constexpr uint8_t kPzem017Address = 0x01;
 constexpr uint32_t kPzem017BaudRate = 9600;
 constexpr uint8_t kPzem017RegisterCount = 8;
 constexpr uint16_t kPzem017ResponseSize = 3 + (kPzem017RegisterCount * 2) + 2;
-
-constexpr float kBatteryEmptyVoltage = 10.5f;
-constexpr float kBatteryFullVoltage = 12.8f;
 
 // Set to a valid GPIO pin if your RS485 transceiver needs DE/RE control.
 constexpr int8_t kRs485DirectionPin = -1;
@@ -157,15 +160,33 @@ float estimateSocFromVoltage(float voltage)
     return NAN;
   }
 
-  if (voltage <= kBatteryEmptyVoltage) {
+  if (voltage <= SOC_EMPTY_VOLTAGE) {
     return 0.0f;
   }
 
-  if (voltage >= kBatteryFullVoltage) {
+  if (voltage >= SOC_CHARGE_MAX_VOLTAGE) {
     return 100.0f;
   }
 
-  return ((voltage - kBatteryEmptyVoltage) * 100.0f) / (kBatteryFullVoltage - kBatteryEmptyVoltage);
+  if (voltage >= SOC_FULL_REST_VOLTAGE) {
+    float upperBand = SOC_CHARGE_MAX_VOLTAGE - SOC_FULL_REST_VOLTAGE;
+    if (upperBand <= 0.0f) {
+      return 100.0f;
+    }
+
+    return 95.0f + (((voltage - SOC_FULL_REST_VOLTAGE) * 5.0f) / upperBand);
+  }
+
+  return ((voltage - SOC_EMPTY_VOLTAGE) * 95.0f) / (SOC_FULL_REST_VOLTAGE - SOC_EMPTY_VOLTAGE);
+}
+
+float estimateRemainingCapacityAh(float socPercent)
+{
+  if (!isfinite(socPercent)) {
+    return NAN;
+  }
+
+  return (SOC_BATTERY_CAPACITY_AH * socPercent) / 100.0f;
 }
 
 void showOledMessage(const __FlashStringHelper *line1, const __FlashStringHelper *line2)
@@ -180,7 +201,7 @@ void showOledMessage(const __FlashStringHelper *line1, const __FlashStringHelper
   display.display();
 }
 
-void updateOledDisplay(const Pzem017Reading &reading, float socPercent)
+void updateOledDisplay(const Pzem017Reading &reading, float socPercent, float remainingCapacityAh)
 {
   display.clearDisplay();
   display.setTextSize(1);
@@ -206,7 +227,8 @@ void updateOledDisplay(const Pzem017Reading &reading, float socPercent)
   display.print(F("SoC: "));
   if (isfinite(socPercent)) {
     display.print(socPercent, 1);
-    display.println(F(" %"));
+    display.print(F(" %  Ah: "));
+    display.println(remainingCapacityAh, 1);
   } else {
     display.println(F("N/A"));
   }
@@ -214,8 +236,45 @@ void updateOledDisplay(const Pzem017Reading &reading, float socPercent)
   display.display();
 }
 
-void printPzem017Reading(const Pzem017Reading &reading, float socPercent)
+void printPzem017Reading(const Pzem017Reading &reading, float socPercent, float remainingCapacityAh)
 {
+#if ENABLE_PYTHON_JSON_OUTPUT
+  Serial.print(F("{\"type\":\"pzem017\",\"ok\":true,\"millis\":"));
+  Serial.print(millis());
+  Serial.print(F(",\"voltage\":"));
+  Serial.print(reading.voltage, 2);
+  Serial.print(F(",\"current\":"));
+  Serial.print(reading.current, 2);
+  Serial.print(F(",\"power\":"));
+  Serial.print(reading.power, 1);
+  Serial.print(F(",\"energy_wh\":"));
+  Serial.print(reading.energy, 0);
+  Serial.print(F(",\"soc_percent\":"));
+  if (isfinite(socPercent)) {
+    Serial.print(socPercent, 1);
+  } else {
+    Serial.print(F("null"));
+  }
+  Serial.print(F(",\"remaining_ah\":"));
+  if (isfinite(remainingCapacityAh)) {
+    Serial.print(remainingCapacityAh, 1);
+  } else {
+    Serial.print(F("null"));
+  }
+  Serial.print(F(",\"raw_voltage\":"));
+  Serial.print(reading.rawVoltage);
+  Serial.print(F(",\"raw_current\":"));
+  Serial.print(reading.rawCurrent);
+  Serial.print(F(",\"raw_power\":"));
+  Serial.print(reading.rawPower);
+  Serial.print(F(",\"raw_energy\":"));
+  Serial.print(reading.rawEnergy);
+  Serial.print(F(",\"high_voltage_alarm\":"));
+  Serial.print(reading.highVoltageAlarm);
+  Serial.print(F(",\"low_voltage_alarm\":"));
+  Serial.print(reading.lowVoltageAlarm);
+  Serial.println(F("}"));
+#else
   Serial.print(F("PZEM-017 V="));
   Serial.print(reading.voltage, 2);
   Serial.print(F("V I="));
@@ -227,8 +286,9 @@ void printPzem017Reading(const Pzem017Reading &reading, float socPercent)
   Serial.print(F("Wh SoC="));
 
   if (isfinite(socPercent)) {
-  Serial.print(socPercent, 1);
-    Serial.println(F("%"));
+    Serial.print(socPercent, 1);
+    Serial.print(F("% RemAh="));
+    Serial.println(remainingCapacityAh, 1);
   } else {
     Serial.println(F("N/A"));
   }
@@ -245,6 +305,18 @@ void printPzem017Reading(const Pzem017Reading &reading, float socPercent)
   Serial.print(reading.rawHighVoltageAlarm);
   Serial.print(F(" LV="));
   Serial.println(reading.rawLowVoltageAlarm);
+#endif
+}
+
+void printPzem017ReadError()
+{
+#if ENABLE_PYTHON_JSON_OUTPUT
+  Serial.print(F("{\"type\":\"pzem017\",\"ok\":false,\"millis\":"));
+  Serial.print(millis());
+  Serial.println(F(",\"error\":\"read_failed\"}"));
+#else
+  Serial.println(F("PZEM-017 read failed"));
+#endif
 }
 
 void showSolidColor(uint8_t red, uint8_t green, uint8_t blue)
@@ -310,10 +382,11 @@ void loop()
     Pzem017Reading reading;
     if (readPzem017(reading)) {
       float socPercent = estimateSocFromVoltage(reading.voltage);
-      printPzem017Reading(reading, socPercent);
-      updateOledDisplay(reading, socPercent);
+      float remainingCapacityAh = estimateRemainingCapacityAh(socPercent);
+      printPzem017Reading(reading, socPercent, remainingCapacityAh);
+      updateOledDisplay(reading, socPercent, remainingCapacityAh);
     } else {
-      Serial.println(F("PZEM-017 read failed"));
+      printPzem017ReadError();
       showOledMessage(F("PZEM-017"), F("Read failed"));
     }
   }
