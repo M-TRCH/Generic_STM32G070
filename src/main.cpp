@@ -3,6 +3,10 @@
 
 constexpr uint16_t kPixelCount = 144;
 constexpr uint8_t kPixelPin = PA8;
+constexpr uint8_t kDefaultBrightness = 40;
+
+#define ENABLE_SOLID_COLOR_TEST
+#define ENABLE_RAINBOW_ANIMATION 
 
 Adafruit_NeoPixel strip(kPixelCount, kPixelPin, NEO_GRB + NEO_KHZ800);
 
@@ -14,14 +18,7 @@ void showSolidColor(uint8_t red, uint8_t green, uint8_t blue)
   strip.show();
 }
 
-void setup()
-{
-  strip.begin();
-  strip.setBrightness(40);
-  strip.show();
-}
-
-void loop()
+void showRainbowAnimation()
 {
   for (uint16_t offset = 0; offset < 65535; offset += 256) {
     strip.clear();
@@ -34,4 +31,24 @@ void loop()
     strip.show();
     delay(20);
   }
+}
+
+void setup()
+{
+  strip.begin();
+  strip.setBrightness(kDefaultBrightness);
+  strip.show();
+}
+
+void loop()
+{
+#ifdef ENABLE_SOLID_COLOR_TEST
+  showSolidColor(255, 0, 0);
+  delay(1000);
+#endif
+
+#ifdef ENABLE_RAINBOW_ANIMATION
+  showRainbowAnimation();
+#endif
+
 }
