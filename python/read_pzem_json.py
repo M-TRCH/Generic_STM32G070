@@ -1,5 +1,7 @@
 import argparse
+import csv
 import json
+from pathlib import Path
 import sys
 import time
 from typing import Any
@@ -18,6 +20,46 @@ except ImportError as exc:
 
 DEFAULT_BAUDRATE = 115200
 DEFAULT_TIMEOUT = 1.0
+DEFAULT_LOG_FILENAME = "pzem_log.csv"
+
+
+def build_log_path() -> Path:
+    return Path(__file__).resolve().with_name(DEFAULT_LOG_FILENAME)
+
+
+def build_csv_row(packet: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "pc_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "type": packet.get("type"),
+        "ok": packet.get("ok"),
+        "millis": packet.get("millis"),
+        "voltage": packet.get("voltage"),
+        "current": packet.get("current"),
+        "power": packet.get("power"),
+        "energy_wh": packet.get("energy_wh"),
+        "soc_percent": packet.get("soc_percent"),
+        "remaining_ah": packet.get("remaining_ah"),
+        "raw_voltage": packet.get("raw_voltage"),
+        "raw_current": packet.get("raw_current"),
+        "raw_power": packet.get("raw_power"),
+        "raw_energy": packet.get("raw_energy"),
+        "high_voltage_alarm": packet.get("high_voltage_alarm"),
+        "low_voltage_alarm": packet.get("low_voltage_alarm"),
+        "error": packet.get("error"),
+    }
+
+
+def open_csv_logger() -> tuple[Any, csv.DictWriter]:
+    log_path = build_log_path()
+    fieldnames = list(build_csv_row({}).keys())
+    file_handle = log_path.open("a", newline="", encoding="utf-8")
+    writer = csv.DictWriter(file_handle, fieldnames=fieldnames)
+
+    if log_path.stat().st_size == 0:
+        writer.writeheader()
+        file_handle.flush()
+
+    return file_handle, writer
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -88,8 +130,10 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        with serial.Serial(args.port, args.baudrate, timeout=args.timeout) as port:
+        with serial.Serial(args.port, args.baudrate, timeout=args.timeout) as port, open_csv_logger()[0] as log_file:
+            log_writer = csv.DictWriter(log_file, fieldnames=list(build_csv_row({}).keys()))
             print(f"Listening on {port.port} @ {port.baudrate} baud...")
+            print(f"Logging CSV to {build_log_path()}")
             while True:
                 line = port.readline()
                 if not line:
@@ -108,6 +152,9 @@ def main() -> int:
                 except json.JSONDecodeError:
                     print(f"NON_JSON: {decoded}")
                     continue
+
+                log_writer.writerow(build_csv_row(packet))
+                log_file.flush()
 
                 if args.raw:
                     print(json.dumps(packet, ensure_ascii=True))
