@@ -129,8 +129,8 @@ bool readPzem017(Pzem017Reading &reading)
 
   reading.rawVoltage = readRegister(3);
   reading.rawCurrent = readRegister(5);
-  reading.rawPower = (static_cast<uint32_t>(readRegister(7)) << 16) | readRegister(9);
-  reading.rawEnergy = (static_cast<uint32_t>(readRegister(11)) << 16) | readRegister(13);
+  reading.rawPower = (static_cast<uint32_t>(readRegister(9)) << 16) | readRegister(7);
+  reading.rawEnergy = (static_cast<uint32_t>(readRegister(13)) << 16) | readRegister(11);
   reading.rawHighVoltageAlarm = readRegister(15);
   reading.rawLowVoltageAlarm = readRegister(17);
 
@@ -237,7 +237,7 @@ void setup()
   //   delay(200);
   // }
   
-  Serial1.begin(9600);
+  Serial1.begin(kPzem017BaudRate, SERIAL_8N2);
   
   strip.begin();
   strip.setBrightness(kDefaultBrightness);
