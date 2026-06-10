@@ -1,6 +1,9 @@
 #include <Arduino.h>
+#include <Adafruit_GFX.h>
 #include <Adafruit_NeoPixel.h>
+#include <Adafruit_SSD1306.h>
 #include <HardwareSerial.h>
+#include <Wire.h>
 
 HardwareSerial Serial1(PB7, PA9); // RX, TX
 
@@ -9,6 +12,10 @@ HardwareSerial Serial1(PB7, PA9); // RX, TX
 constexpr uint16_t kPixelCount = 144;
 constexpr uint8_t kPixelPin = PA8;
 constexpr uint8_t kDefaultBrightness = 40;
+constexpr uint8_t kDisplayWidth = 128;
+constexpr uint8_t kDisplayHeight = 64;
+constexpr int8_t kDisplayResetPin = -1;
+constexpr uint8_t kDisplayAddress = 0x3C;
 
 #define ENABLE_PZEM017_SOC 1
 #define ENABLE_SOLID_COLOR_TEST 0
@@ -26,6 +33,7 @@ constexpr float kBatteryFullVoltage = 12.8f;
 constexpr int8_t kRs485DirectionPin = -1;
 
 Adafruit_NeoPixel strip(kPixelCount, kPixelPin, NEO_GRB + NEO_KHZ800);
+Adafruit_SSD1306 display(kDisplayWidth, kDisplayHeight, &Wire, kDisplayResetPin);
 
 struct Pzem017Reading
 {
@@ -160,6 +168,52 @@ float estimateSocFromVoltage(float voltage)
   return ((voltage - kBatteryEmptyVoltage) * 100.0f) / (kBatteryFullVoltage - kBatteryEmptyVoltage);
 }
 
+void showOledMessage(const __FlashStringHelper *line1, const __FlashStringHelper *line2)
+{
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println(line1);
+  display.println();
+  display.println(line2);
+  display.display();
+}
+
+void updateOledDisplay(const Pzem017Reading &reading, float socPercent)
+{
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+
+  display.print(F("V: "));
+  display.print(reading.voltage, 2);
+  display.println(F(" V"));
+
+  display.print(F("I: "));
+  display.print(reading.current, 2);
+  display.println(F(" A"));
+
+  display.print(F("P: "));
+  display.print(reading.power, 1);
+  display.println(F(" W"));
+
+  display.print(F("E: "));
+  display.print(reading.energy, 0);
+  display.println(F(" Wh"));
+
+  display.print(F("SoC: "));
+  if (isfinite(socPercent)) {
+    display.print(socPercent, 1);
+    display.println(F(" %"));
+  } else {
+    display.println(F("N/A"));
+  }
+
+  display.display();
+}
+
 void printPzem017Reading(const Pzem017Reading &reading, float socPercent)
 {
   Serial.print(F("PZEM-017 V="));
@@ -218,30 +272,31 @@ void showRainbowAnimation()
 
 void setup()
 {
-
-  
+  // Initialize the built-in LED pin as an output
   pinMode(LED_BUILTIN, OUTPUT);
   
+  // debug serial port
   Serial.setRx(PA15);
   Serial.setTx(PA2);
   Serial.begin(115200);
 
-  // for (uint8_t i = 0; i < 1000; ++i) 
-  // {
-  //   Serial.println(F("go..."));
-  //   Serial.println();
-    
-  //   digitalWrite(LED_BUILTIN, HIGH);
-  //   delay(200);
-  //   digitalWrite(LED_BUILTIN, LOW);
-  //   delay(200);
-  // }
-  
+  // rs485 serial port for PZEM-017
   Serial1.begin(kPzem017BaudRate, SERIAL_8N2);
   
+  // neopixel setup
   strip.begin();
   strip.setBrightness(kDefaultBrightness);
   strip.show();
+
+  Wire.setSDA(PA12);
+  Wire.setSCL(PB13);
+  Wire.begin();
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, kDisplayAddress)) {
+    Serial.println(F("SSD1306 init failed"));
+  } else {
+    showOledMessage(F("PZEM-017 OLED"), F("Display ready"));
+  }
 }
 
 void loop()
@@ -256,8 +311,10 @@ void loop()
     if (readPzem017(reading)) {
       float socPercent = estimateSocFromVoltage(reading.voltage);
       printPzem017Reading(reading, socPercent);
+      updateOledDisplay(reading, socPercent);
     } else {
       Serial.println(F("PZEM-017 read failed"));
+      showOledMessage(F("PZEM-017"), F("Read failed"));
     }
   }
 #elif ENABLE_SOLID_COLOR_TEST
