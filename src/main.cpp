@@ -27,6 +27,14 @@ constexpr uint8_t kDisplayAddress = 0x3C;
 #define SOC_FULL_REST_VOLTAGE     28.7f
 #define SOC_EMPTY_VOLTAGE         20.5f
 
+// SOC_CURRENT_SIGN: -1.0 = PZEM วัดกระแส discharge (SoC ลด),
+//                  +1.0 = PZEM วัดกระแส charge (SoC เพิ่ม)
+#define SOC_CURRENT_SIGN          -1.0f
+// กระแสต่ำกว่าค่านี้ (A) = แบตพัก → ใช้ OCV table ปรับ SoC
+#define SOC_RESTING_THRESHOLD_A   0.10f
+// ชาร์จเต็มเมื่อแรงดัน >= SOC_CHARGE_MAX_VOLTAGE และกระแส < ค่านี้ (A)
+#define SOC_CHARGE_COMPLETE_A     0.20f
+
 constexpr uint8_t kPzem017Address = 0x01;
 constexpr uint32_t kPzem017BaudRate = 9600;
 constexpr uint8_t kPzem017RegisterCount = 8;
@@ -154,30 +162,108 @@ bool readPzem017(Pzem017Reading &reading)
   return true;
 }
 
-float estimateSocFromVoltage(float voltage)
+// OCV table สำหรับ LiFePO4 8S (แรงดันพักเทียบกับ SoC)
+// ที่มา: ข้อมูลมาตรฐาน LiFePO4 × 8 เซล
+struct OcvPoint
 {
-  if (!isfinite(voltage)) {
-    return NAN;
-  }
+  float voltage;
+  float soc;
+};
 
-  if (voltage <= SOC_EMPTY_VOLTAGE) {
-    return 0.0f;
-  }
+static const OcvPoint kOcvTable[] = {
+  { 29.20f, 100.0f },  // 3.650 V/cell - cutoff ชาร์จ
+  { 27.20f,  95.0f },  // 3.400 V/cell - พักหลังชาร์จเต็ม
+  { 26.80f,  90.0f },  // 3.350 V/cell
+  { 26.64f,  80.0f },  // 3.330 V/cell
+  { 26.48f,  70.0f },  // 3.310 V/cell
+  { 26.32f,  60.0f },  // 3.290 V/cell
+  { 26.16f,  50.0f },  // 3.270 V/cell (โซนแบน LiFePO4)
+  { 26.00f,  40.0f },  // 3.250 V/cell
+  { 25.76f,  30.0f },  // 3.220 V/cell
+  { 25.36f,  20.0f },  // 3.170 V/cell
+  { 24.24f,  10.0f },  // 3.030 V/cell
+  { 22.40f,   5.0f },  // 2.800 V/cell
+  { 20.50f,   0.0f },  // 2.563 V/cell - cutoff ว่าง (= SOC_EMPTY_VOLTAGE)
+};
 
-  if (voltage >= SOC_CHARGE_MAX_VOLTAGE) {
+static const uint8_t kOcvTableSize = sizeof(kOcvTable) / sizeof(kOcvTable[0]);
+
+float lookupSocFromOcv(float voltage)
+{
+  if (voltage >= kOcvTable[0].voltage) {
     return 100.0f;
   }
 
-  if (voltage >= SOC_FULL_REST_VOLTAGE) {
-    float upperBand = SOC_CHARGE_MAX_VOLTAGE - SOC_FULL_REST_VOLTAGE;
-    if (upperBand <= 0.0f) {
-      return 100.0f;
-    }
-
-    return 95.0f + (((voltage - SOC_FULL_REST_VOLTAGE) * 5.0f) / upperBand);
+  if (voltage <= kOcvTable[kOcvTableSize - 1].voltage) {
+    return 0.0f;
   }
 
-  return ((voltage - SOC_EMPTY_VOLTAGE) * 95.0f) / (SOC_FULL_REST_VOLTAGE - SOC_EMPTY_VOLTAGE);
+  for (uint8_t i = 0; i < kOcvTableSize - 1; ++i) {
+    if (voltage <= kOcvTable[i].voltage && voltage >= kOcvTable[i + 1].voltage) {
+      float ratio = (voltage - kOcvTable[i + 1].voltage)
+                    / (kOcvTable[i].voltage - kOcvTable[i + 1].voltage);
+      return kOcvTable[i + 1].soc + ratio * (kOcvTable[i].soc - kOcvTable[i + 1].soc);
+    }
+  }
+
+  return NAN;
+}
+
+// Hybrid SoC: Coulomb counting หลัก + OCV calibration + voltage anchor
+float updateSocState(const Pzem017Reading &reading)
+{
+  static float socPercent = NAN;
+  static uint32_t lastMs = 0;
+
+  const uint32_t nowMs = millis();
+  const float voltageV = reading.voltage;
+  const float currentA = reading.current;
+
+  if (!isfinite(voltageV) || !isfinite(currentA)) {
+    return socPercent;
+  }
+
+  // Anchor: ชาร์จเต็ม → reset เป็น 100%
+  if (voltageV >= SOC_CHARGE_MAX_VOLTAGE && currentA < SOC_CHARGE_COMPLETE_A) {
+    socPercent = 100.0f;
+    lastMs = nowMs;
+    return socPercent;
+  }
+
+  // Anchor: หมด → reset เป็น 0%
+  if (voltageV <= SOC_EMPTY_VOLTAGE) {
+    socPercent = 0.0f;
+    lastMs = nowMs;
+    return socPercent;
+  }
+
+  // ยังไม่มีค่าเริ่มต้น → ดึงจาก OCV table
+  if (!isfinite(socPercent)) {
+    socPercent = lookupSocFromOcv(voltageV);
+    lastMs = nowMs;
+    return socPercent;
+  }
+
+  // แบตพัก (กระแสต่ำมาก) → ค่อยๆ drift เข้าหา OCV
+  if (currentA < SOC_RESTING_THRESHOLD_A) {
+    float ocvSoc = lookupSocFromOcv(voltageV);
+    if (isfinite(ocvSoc)) {
+      socPercent = socPercent * 0.98f + ocvSoc * 0.02f;
+    }
+    lastMs = nowMs;
+    return socPercent;
+  }
+
+  // Coulomb counting (กระแสมีนัยสำคัญ)
+  if (lastMs != 0U) {
+    const float dtHours = static_cast<float>(nowMs - lastMs) / 3600000.0f;
+    const float deltaSoc = (currentA * dtHours / SOC_BATTERY_CAPACITY_AH) * 100.0f;
+    socPercent += SOC_CURRENT_SIGN * deltaSoc;
+    socPercent = constrain(socPercent, 0.0f, 100.0f);
+  }
+
+  lastMs = nowMs;
+  return socPercent;
 }
 
 float estimateRemainingCapacityAh(float socPercent)
@@ -381,7 +467,7 @@ void loop()
 
     Pzem017Reading reading;
     if (readPzem017(reading)) {
-      float socPercent = estimateSocFromVoltage(reading.voltage);
+      float socPercent = updateSocState(reading);
       float remainingCapacityAh = estimateRemainingCapacityAh(socPercent);
       printPzem017Reading(reading, socPercent, remainingCapacityAh);
       updateOledDisplay(reading, socPercent, remainingCapacityAh);
