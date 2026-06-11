@@ -33,8 +33,7 @@ constexpr uint8_t kDisplayI2cAddress =
   (OLED_PANEL_TYPE == OLED_PANEL_130) ? OLED_ADDR_130 : static_cast<uint8_t>(OLED_ADDR_096 << 1);
 
 #define ENABLE_PZEM017_SOC          0
-#define ENABLE_SHT40_TEST           0
-#define ENABLE_RTC_TEST             1
+#define ENABLE_SHT40_TEST           1
 #define ENABLE_SOLID_COLOR_TEST     0
 #define ENABLE_RAINBOW_ANIMATION    0
 #define ENABLE_PYTHON_JSON_OUTPUT   0
@@ -632,30 +631,44 @@ void showOledMessage(const __FlashStringHelper *line1, const __FlashStringHelper
   display.sendBuffer();
 }
 
-void updateOledDisplay(const Sht40Reading &reading)
+void updateOledDisplay(const Sht40Reading &reading, const RTC_TimeTypeDef &time,
+                       const RTC_DateTypeDef &date)
 {
+  char timeText[12] = {};
+  char dateLine[24] = {};
   char temperatureValue[12] = {};
   char humidityValue[12] = {};
   char temperatureLine[24] = {};
   char humidityLine[24] = {};
 
+  snprintf(timeText, sizeof(timeText), "%02u:%02u:%02u",
+           static_cast<unsigned>(time.Hours), static_cast<unsigned>(time.Minutes),
+           static_cast<unsigned>(time.Seconds));
+  snprintf(dateLine, sizeof(dateLine), "Date: %02u/%02u/20%02u",
+           static_cast<unsigned>(date.Date), static_cast<unsigned>(date.Month),
+           static_cast<unsigned>(date.Year));
+
   dtostrf(reading.temperatureC, 0, 2, temperatureValue);
   dtostrf(reading.humidityPercent, 0, 2, humidityValue);
-
   snprintf(temperatureLine, sizeof(temperatureLine), "Temp: %s C", temperatureValue);
   snprintf(humidityLine, sizeof(humidityLine), "Hum : %s %%RH", humidityValue);
 
   display.clearBuffer();
+
+  // Header bar shows the current time (inverted text on filled box)
   display.setFont(kOledWideFont);
   display.drawBox(0, 0, kDisplayWidth, kOledHeaderHeight);
   display.setDrawColor(0);
-  drawCenteredText(oledWideLineY(0), "SHT40 Sensor");
+  drawCenteredText(oledWideLineY(0), timeText);
   display.setDrawColor(1);
 
-  display.setCursor(kOledLeftPadding, static_cast<int16_t>(oledWideLineY(1) + kOledSensorBodyOffsetY));
+  // Body: date, temperature, humidity
+  display.setFont(kOledCompactFont);
+  display.setCursor(kOledLeftPadding, oledLineY(2));
+  display.print(dateLine);
+  display.setCursor(kOledLeftPadding, oledLineY(3));
   display.print(temperatureLine);
-
-  display.setCursor(kOledLeftPadding, static_cast<int16_t>(oledWideLineY(2) + kOledSensorBodyOffsetY));
+  display.setCursor(kOledLeftPadding, oledLineY(4));
   display.print(humidityLine);
 
   display.sendBuffer();
@@ -879,7 +892,7 @@ void setup()
   Wire1.begin();
 #endif
 
-#if ENABLE_RTC_TEST
+#if ENABLE_SHT40_TEST
   if (initRtc()) {
     if (kRtcSetFromCodeOnBoot) {
       if (setRtcDateTime(kRtcSetYear, kRtcSetMonth, kRtcSetDate,
@@ -924,27 +937,24 @@ void loop()
   if (millis() - lastReadMs >= 1000U) {
     lastReadMs = millis();
 
-    Sht40Reading reading;
-    if (readSht40(reading)) {
-      printSht40Reading(reading);
-      updateOledDisplay(reading);
-    } else {
-      Serial.println(F("SHT40 read failed"));
-      showOledMessage(F("SHT40"), F("Read failed"));
-    }
-  }
-#elif ENABLE_RTC_TEST
-  static uint32_t lastReadMs = 0;
-
-  if (millis() - lastReadMs >= 1000U) {
-    lastReadMs = millis();
-
     RTC_TimeTypeDef time = {};
     RTC_DateTypeDef date = {};
-    if (readRtc(time, date)) {
+    bool rtcOk = readRtc(time, date);
+    if (rtcOk) {
       printRtcReading(time, date);
     } else {
       Serial.println(F("RTC read failed"));
+    }
+
+    Sht40Reading reading;
+    if (readSht40(reading)) {
+      printSht40Reading(reading);
+      if (rtcOk) {
+        updateOledDisplay(reading, time, date);
+      }
+    } else {
+      Serial.println(F("SHT40 read failed"));
+      showOledMessage(F("SHT40"), F("Read failed"));
     }
   }
 #elif ENABLE_SOLID_COLOR_TEST
