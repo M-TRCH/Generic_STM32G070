@@ -1,8 +1,7 @@
 #include <Arduino.h>
-#include <Adafruit_GFX.h>
 #include <Adafruit_NeoPixel.h>
-#include <Adafruit_SSD1306.h>
 #include <HardwareSerial.h>
+#include <U8g2lib.h>
 #include <Wire.h>
 
 // Pin definitions and constants
@@ -26,10 +25,10 @@ constexpr uint8_t kDefaultBrightness = 40;
 constexpr uint8_t kDisplayWidth = 128;
 constexpr uint8_t kDisplayHeight = 64;
 constexpr int8_t kDisplayResetPin = -1;
-// Adafruit_SSD1306 expects a 7-bit I2C address. The 1.3-inch module here uses
-// 0x78 as the 8-bit bus address, so it is shifted to 0x3C for the library.
-constexpr uint8_t kDisplayAddress =
-  (OLED_PANEL_TYPE == OLED_PANEL_130) ? (OLED_ADDR_130 >> 1) : OLED_ADDR_096;
+// U8g2 uses the 8-bit I2C address form. The 0.96-inch SSD1306 display is
+// typically documented as 7-bit 0x3C, so it is shifted to 0x78 here.
+constexpr uint8_t kDisplayI2cAddress =
+  (OLED_PANEL_TYPE == OLED_PANEL_130) ? OLED_ADDR_130 : static_cast<uint8_t>(OLED_ADDR_096 << 1);
 
 #define ENABLE_PZEM017_SOC          0
 #define ENABLE_SHT40_TEST           1
@@ -62,7 +61,11 @@ constexpr uint8_t kSht40MeasureHighPrecision = 0xFD;
 constexpr int8_t kRs485DirectionPin = -1;
 
 Adafruit_NeoPixel strip(kPixelCount, kPixelPin, NEO_GRB + NEO_KHZ800);
-Adafruit_SSD1306 display(kDisplayWidth, kDisplayHeight, &Wire, kDisplayResetPin);
+#if OLED_PANEL_TYPE == OLED_PANEL_130
+U8G2_SH1106_128X64_NONAME_F_HW_I2C display(U8G2_R0, U8X8_PIN_NONE);
+#else
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R0, U8X8_PIN_NONE);
+#endif
 
 struct Pzem017Reading
 {
@@ -131,56 +134,55 @@ void setRs485Transmit(bool enabled)
   digitalWrite(static_cast<uint8_t>(kRs485DirectionPin), enabled ? HIGH : LOW);
 }
 
-
-  bool readSht40(Sht40Reading &reading)
-  {
-    uint8_t command = kSht40MeasureHighPrecision;
-    Wire1.beginTransmission(kSht40Address);
-    Wire1.write(&command, 1);
-    if (Wire1.endTransmission() != 0) {
-      return false;
-    }
-
-    delay(10);
-
-    constexpr uint8_t kResponseSize = 6;
-    uint8_t response[kResponseSize] = {};
-    if (Wire1.requestFrom(static_cast<int>(kSht40Address), static_cast<int>(kResponseSize)) != kResponseSize) {
-      return false;
-    }
-
-    for (uint8_t i = 0; i < kResponseSize; ++i) {
-      if (!Wire1.available()) {
-        return false;
-      }
-      response[i] = static_cast<uint8_t>(Wire1.read());
-    }
-
-    if (crc8Sensirion(response, 2) != response[2]) {
-      return false;
-    }
-
-    if (crc8Sensirion(response + 3, 2) != response[5]) {
-      return false;
-    }
-
-    uint16_t rawTemperature = static_cast<uint16_t>(response[0] << 8) | response[1];
-    uint16_t rawHumidity = static_cast<uint16_t>(response[3] << 8) | response[4];
-
-    reading.temperatureC = -45.0f + (175.0f * static_cast<float>(rawTemperature) / 65535.0f);
-    reading.humidityPercent = -6.0f + (125.0f * static_cast<float>(rawHumidity) / 65535.0f);
-    reading.humidityPercent = constrain(reading.humidityPercent, 0.0f, 100.0f);
-    return true;
+bool readSht40(Sht40Reading &reading)
+{
+  uint8_t command = kSht40MeasureHighPrecision;
+  Wire1.beginTransmission(kSht40Address);
+  Wire1.write(&command, 1);
+  if (Wire1.endTransmission() != 0) {
+    return false;
   }
 
-  void printSht40Reading(const Sht40Reading &reading)
-  {
-    Serial.print(F("SHT40 T="));
-    Serial.print(reading.temperatureC, 2);
-    Serial.print(F("C RH="));
-    Serial.print(reading.humidityPercent, 2);
-    Serial.println(F("%"));
+  delay(10);
+
+  constexpr uint8_t kResponseSize = 6;
+  uint8_t response[kResponseSize] = {};
+  if (Wire1.requestFrom(static_cast<int>(kSht40Address), static_cast<int>(kResponseSize)) != kResponseSize) {
+    return false;
   }
+
+  for (uint8_t i = 0; i < kResponseSize; ++i) {
+    if (!Wire1.available()) {
+      return false;
+    }
+    response[i] = static_cast<uint8_t>(Wire1.read());
+  }
+
+  if (crc8Sensirion(response, 2) != response[2]) {
+    return false;
+  }
+
+  if (crc8Sensirion(response + 3, 2) != response[5]) {
+    return false;
+  }
+
+  uint16_t rawTemperature = static_cast<uint16_t>(response[0] << 8) | response[1];
+  uint16_t rawHumidity = static_cast<uint16_t>(response[3] << 8) | response[4];
+
+  reading.temperatureC = -45.0f + (175.0f * static_cast<float>(rawTemperature) / 65535.0f);
+  reading.humidityPercent = -6.0f + (125.0f * static_cast<float>(rawHumidity) / 65535.0f);
+  reading.humidityPercent = constrain(reading.humidityPercent, 0.0f, 100.0f);
+  return true;
+}
+
+void printSht40Reading(const Sht40Reading &reading)
+{
+  Serial.print(F("SHT40 T="));
+  Serial.print(reading.temperatureC, 2);
+  Serial.print(F("C RH="));
+  Serial.print(reading.humidityPercent, 2);
+  Serial.println(F("%"));
+}
 bool readPzem017(Pzem017Reading &reading)
 {
   HardwareSerial &pzemPort = Serial1;
@@ -368,72 +370,80 @@ float estimateRemainingCapacityAh(float socPercent)
   return (SOC_BATTERY_CAPACITY_AH * socPercent) / 100.0f;
 }
 
+constexpr int16_t kOledLine1Y = 12;
+constexpr int16_t kOledLineSpacing = 12;
+
+int16_t oledLineY(uint8_t lineIndex)
+{
+  return static_cast<int16_t>(kOledLine1Y + (lineIndex * kOledLineSpacing));
+}
+
 void showOledMessage(const __FlashStringHelper *line1, const __FlashStringHelper *line2)
 {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println(line1);
-  display.println();
-  display.println(line2);
-  display.display();
+  display.clearBuffer();
+  display.setFont(u8g2_font_6x12_tf);
+  display.setCursor(0, oledLineY(0));
+  display.print(line1);
+  display.setCursor(0, oledLineY(2));
+  display.print(line2);
+  display.sendBuffer();
 }
 
 void updateOledDisplay(const Sht40Reading &reading)
 {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
+  display.clearBuffer();
+  display.setFont(u8g2_font_6x12_tf);
+  display.setCursor(0, oledLineY(0));
+  display.print(F("SHT40 Sensor"));
 
-  display.println(F("SHT40 Sensor"));
-  display.println();
-
+  display.setCursor(0, oledLineY(1));
   display.print(F("Temp: "));
   display.print(reading.temperatureC, 2);
-  display.println(F(" C"));
+  display.print(F(" C"));
 
+  display.setCursor(0, oledLineY(2));
   display.print(F("Hum : "));
   display.print(reading.humidityPercent, 2);
-  display.println(F(" %RH"));
+  display.print(F(" %RH"));
 
-  display.display();
+  display.sendBuffer();
 }
 
 void updateOledDisplay(const Pzem017Reading &reading, float socPercent, float remainingCapacityAh)
 {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-
+  display.clearBuffer();
+  display.setFont(u8g2_font_6x12_tf);
+  display.setCursor(0, oledLineY(0));
   display.print(F("V: "));
   display.print(reading.voltage, 2);
-  display.println(F(" V"));
+  display.print(F(" V"));
 
+  display.setCursor(0, oledLineY(1));
   display.print(F("I: "));
   display.print(reading.current, 2);
-  display.println(F(" A"));
+  display.print(F(" A"));
 
+  display.setCursor(0, oledLineY(2));
   display.print(F("P: "));
   display.print(reading.power, 1);
-  display.println(F(" W"));
+  display.print(F(" W"));
 
+  display.setCursor(0, oledLineY(3));
   display.print(F("E: "));
   display.print(reading.energy, 0);
-  display.println(F(" Wh"));
+  display.print(F(" Wh"));
 
+  display.setCursor(0, oledLineY(4));
   display.print(F("SoC: "));
   if (isfinite(socPercent)) {
     display.print(socPercent, 1);
     display.print(F(" %  Ah: "));
-    display.println(remainingCapacityAh, 1);
+    display.print(remainingCapacityAh, 1);
   } else {
-    display.println(F("N/A"));
+    display.print(F("N/A"));
   }
 
-  display.display();
+  display.sendBuffer();
 }
 
 void printPzem017Reading(const Pzem017Reading &reading, float socPercent, float remainingCapacityAh)
@@ -590,15 +600,27 @@ void setup()
   Wire.setSCL(PB13);
   Wire.begin();
 
-  if (!display.begin(SSD1306_SWITCHCAPVCC, kDisplayAddress)) {
-    Serial.println(F("SSD1306 init failed"));
-#if ENABLE_SHT40_TEST
-  } else if (ENABLE_SHT40_TEST) {
-    showOledMessage(F("SHT40 OLED"), F("Display ready"));
+  display.setI2CAddress(kDisplayI2cAddress);
+  display.begin();
+
+#if OLED_PANEL_TYPE == OLED_PANEL_130
+  Serial.println(F("OLED driver: SH1106"));
+#else
+  Serial.println(F("OLED driver: SSD1306"));
 #endif
+
+  Serial.print(F("OLED I2C addr: 0x"));
+  Serial.println(kDisplayI2cAddress, HEX);
+
+#if ENABLE_SHT40_TEST
+  if (ENABLE_SHT40_TEST) {
+    showOledMessage(F("SHT40 OLED"), F("Display ready"));
   } else {
     showOledMessage(F("PZEM-017 OLED"), F("Display ready"));
   }
+#else
+  showOledMessage(F("PZEM-017 OLED"), F("Display ready"));
+#endif
 #endif
 
 #if ENABLE_SHT40_TEST
