@@ -7,6 +7,8 @@
 
 // Pin definitions and constants
 HardwareSerial Serial1(PB7, PA9); // RX, TX
+TwoWire Wire1(PB9, PB6);          // SDA, SCL for SHT40
+
 #define LED_BUILTIN     PA10
 #define LATCH_TRIG_PIN  PB3   // Latch trigger pin
 #define LATCH_ULK_PIN   PA3   // Latch unlock pin (active LOW)
@@ -14,16 +16,27 @@ HardwareSerial Serial1(PB7, PA9); // RX, TX
 constexpr uint16_t kPixelCount = uint16_t(144 * 3); // 144 pixels per strip
 constexpr uint8_t kPixelPin = PA8;
 constexpr uint8_t kDefaultBrightness = 40;
+
+#define OLED_PANEL_096            0
+#define OLED_PANEL_130            1
+#define OLED_PANEL_TYPE           OLED_PANEL_130
+#define OLED_ADDR_096             0x3C
+#define OLED_ADDR_130             0x78
+
 constexpr uint8_t kDisplayWidth = 128;
 constexpr uint8_t kDisplayHeight = 64;
 constexpr int8_t kDisplayResetPin = -1;
-constexpr uint8_t kDisplayAddress = 0x3C;
+// Adafruit_SSD1306 expects a 7-bit I2C address. The 1.3-inch module here uses
+// 0x78 as the 8-bit bus address, so it is shifted to 0x3C for the library.
+constexpr uint8_t kDisplayAddress =
+  (OLED_PANEL_TYPE == OLED_PANEL_130) ? (OLED_ADDR_130 >> 1) : OLED_ADDR_096;
 
 #define ENABLE_PZEM017_SOC          0
+#define ENABLE_SHT40_TEST           1
 #define ENABLE_SOLID_COLOR_TEST     0
 #define ENABLE_RAINBOW_ANIMATION    0
 #define ENABLE_PYTHON_JSON_OUTPUT   0
-#define ENABLE_LATCH_CONTROL_TEST   1
+#define ENABLE_LATCH_CONTROL_TEST   0
 
 #define SOC_BATTERY_CAPACITY_AH   18.0f
 #define SOC_CHARGE_MAX_VOLTAGE    29.2f
@@ -42,6 +55,8 @@ constexpr uint8_t kPzem017Address = 0x01;
 constexpr uint32_t kPzem017BaudRate = 9600;
 constexpr uint8_t kPzem017RegisterCount = 8;
 constexpr uint16_t kPzem017ResponseSize = 3 + (kPzem017RegisterCount * 2) + 2;
+constexpr uint8_t kSht40Address = 0x44;
+constexpr uint8_t kSht40MeasureHighPrecision = 0xFD;
 
 // Set to a valid GPIO pin if your RS485 transceiver needs DE/RE control.
 constexpr int8_t kRs485DirectionPin = -1;
@@ -65,6 +80,12 @@ struct Pzem017Reading
   uint16_t lowVoltageAlarm = 0;
 };
 
+struct Sht40Reading
+{
+  float temperatureC = NAN;
+  float humidityPercent = NAN;
+};
+
 uint16_t crc16Modbus(const uint8_t *data, size_t length)
 {
   uint16_t crc = 0xFFFF;
@@ -82,6 +103,25 @@ uint16_t crc16Modbus(const uint8_t *data, size_t length)
 
   return crc;
 }
+
+uint8_t crc8Sensirion(const uint8_t *data, size_t length)
+{
+  uint8_t crc = 0xFF;
+
+  for (size_t index = 0; index < length; ++index) {
+    crc ^= data[index];
+    for (uint8_t bit = 0; bit < 8; ++bit) {
+      if (crc & 0x80) {
+        crc = static_cast<uint8_t>((crc << 1) ^ 0x31);
+      } else {
+        crc <<= 1;
+      }
+    }
+  }
+
+  return crc;
+}
+
 void setRs485Transmit(bool enabled)
 {
   if (kRs485DirectionPin < 0) {
@@ -91,6 +131,56 @@ void setRs485Transmit(bool enabled)
   digitalWrite(static_cast<uint8_t>(kRs485DirectionPin), enabled ? HIGH : LOW);
 }
 
+
+  bool readSht40(Sht40Reading &reading)
+  {
+    uint8_t command = kSht40MeasureHighPrecision;
+    Wire1.beginTransmission(kSht40Address);
+    Wire1.write(&command, 1);
+    if (Wire1.endTransmission() != 0) {
+      return false;
+    }
+
+    delay(10);
+
+    constexpr uint8_t kResponseSize = 6;
+    uint8_t response[kResponseSize] = {};
+    if (Wire1.requestFrom(static_cast<int>(kSht40Address), static_cast<int>(kResponseSize)) != kResponseSize) {
+      return false;
+    }
+
+    for (uint8_t i = 0; i < kResponseSize; ++i) {
+      if (!Wire1.available()) {
+        return false;
+      }
+      response[i] = static_cast<uint8_t>(Wire1.read());
+    }
+
+    if (crc8Sensirion(response, 2) != response[2]) {
+      return false;
+    }
+
+    if (crc8Sensirion(response + 3, 2) != response[5]) {
+      return false;
+    }
+
+    uint16_t rawTemperature = static_cast<uint16_t>(response[0] << 8) | response[1];
+    uint16_t rawHumidity = static_cast<uint16_t>(response[3] << 8) | response[4];
+
+    reading.temperatureC = -45.0f + (175.0f * static_cast<float>(rawTemperature) / 65535.0f);
+    reading.humidityPercent = -6.0f + (125.0f * static_cast<float>(rawHumidity) / 65535.0f);
+    reading.humidityPercent = constrain(reading.humidityPercent, 0.0f, 100.0f);
+    return true;
+  }
+
+  void printSht40Reading(const Sht40Reading &reading)
+  {
+    Serial.print(F("SHT40 T="));
+    Serial.print(reading.temperatureC, 2);
+    Serial.print(F("C RH="));
+    Serial.print(reading.humidityPercent, 2);
+    Serial.println(F("%"));
+  }
 bool readPzem017(Pzem017Reading &reading)
 {
   HardwareSerial &pzemPort = Serial1;
@@ -290,6 +380,27 @@ void showOledMessage(const __FlashStringHelper *line1, const __FlashStringHelper
   display.display();
 }
 
+void updateOledDisplay(const Sht40Reading &reading)
+{
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+
+  display.println(F("SHT40 Sensor"));
+  display.println();
+
+  display.print(F("Temp: "));
+  display.print(reading.temperatureC, 2);
+  display.println(F(" C"));
+
+  display.print(F("Hum : "));
+  display.print(reading.humidityPercent, 2);
+  display.println(F(" %RH"));
+
+  display.display();
+}
+
 void updateOledDisplay(const Pzem017Reading &reading, float socPercent, float remainingCapacityAh)
 {
   display.clearDisplay();
@@ -474,16 +585,24 @@ void setup()
   strip.setBrightness(kDefaultBrightness);
   strip.show();
 
-#if ENABLE_PZEM017_SOC 
+#if ENABLE_PZEM017_SOC || ENABLE_SHT40_TEST
   Wire.setSDA(PA12);
   Wire.setSCL(PB13);
   Wire.begin();
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, kDisplayAddress)) {
     Serial.println(F("SSD1306 init failed"));
+#if ENABLE_SHT40_TEST
+  } else if (ENABLE_SHT40_TEST) {
+    showOledMessage(F("SHT40 OLED"), F("Display ready"));
+#endif
   } else {
     showOledMessage(F("PZEM-017 OLED"), F("Display ready"));
   }
+#endif
+
+#if ENABLE_SHT40_TEST
+  Wire1.begin();
 #endif
 }
 
@@ -504,6 +623,21 @@ void loop()
     } else {
       printPzem017ReadError();
       showOledMessage(F("PZEM-017"), F("Read failed"));
+    }
+  }
+#elif ENABLE_SHT40_TEST
+  static uint32_t lastReadMs = 0;
+
+  if (millis() - lastReadMs >= 1000U) {
+    lastReadMs = millis();
+
+    Sht40Reading reading;
+    if (readSht40(reading)) {
+      printSht40Reading(reading);
+      updateOledDisplay(reading);
+    } else {
+      Serial.println(F("SHT40 read failed"));
+      showOledMessage(F("SHT40"), F("Read failed"));
     }
   }
 #elif ENABLE_SOLID_COLOR_TEST
