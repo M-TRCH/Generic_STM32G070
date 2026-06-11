@@ -5,11 +5,13 @@
 #include <HardwareSerial.h>
 #include <Wire.h>
 
+// Pin definitions and constants
 HardwareSerial Serial1(PB7, PA9); // RX, TX
+#define LED_BUILTIN     PA10
+#define LATCH_TRIG_PIN  PB3   // Latch trigger pin
+#define LATCH_ULK_PIN   PA3   // Latch unlock pin (active LOW)
 
-#define LED_BUILTIN PA10
-
-constexpr uint16_t kPixelCount = 144;
+constexpr uint16_t kPixelCount = uint16_t(144 * 3); // 144 pixels per strip
 constexpr uint8_t kPixelPin = PA8;
 constexpr uint8_t kDefaultBrightness = 40;
 constexpr uint8_t kDisplayWidth = 128;
@@ -17,10 +19,11 @@ constexpr uint8_t kDisplayHeight = 64;
 constexpr int8_t kDisplayResetPin = -1;
 constexpr uint8_t kDisplayAddress = 0x3C;
 
-#define ENABLE_PZEM017_SOC 1
-#define ENABLE_SOLID_COLOR_TEST 0
-#define ENABLE_RAINBOW_ANIMATION 0
-#define ENABLE_PYTHON_JSON_OUTPUT 1
+#define ENABLE_PZEM017_SOC          0
+#define ENABLE_SOLID_COLOR_TEST     0
+#define ENABLE_RAINBOW_ANIMATION    0
+#define ENABLE_PYTHON_JSON_OUTPUT   0
+#define ENABLE_LATCH_CONTROL_TEST   1
 
 #define SOC_BATTERY_CAPACITY_AH   18.0f
 #define SOC_CHARGE_MAX_VOLTAGE    29.2f
@@ -428,11 +431,36 @@ void showRainbowAnimation()
   }
 }
 
+void latchControlTest()
+{
+  while(1)
+  {
+    uint8_t latchState = digitalRead(LATCH_ULK_PIN);
+    Serial.print(F("Latch unlock pin state: "));
+    Serial.println(latchState == LOW ? F("LOW (locked)") : F("HIGH (unlocked)"));
+
+    if (latchState == HIGH) 
+    {
+      delay(5000);
+    }
+    else 
+    {
+      digitalWrite(LATCH_TRIG_PIN, HIGH);
+      delay(450);
+      digitalWrite(LATCH_TRIG_PIN, LOW);
+      delay(100);
+    }
+  }
+}
+
 void setup()
 {
   // Initialize the built-in LED pin as an output
   pinMode(LED_BUILTIN, OUTPUT);
-  
+  pinMode(LATCH_TRIG_PIN, OUTPUT);
+  pinMode(LATCH_ULK_PIN, INPUT);
+  digitalWrite(LED_BUILTIN, LOW);
+
   // debug serial port
   Serial.setRx(PA15);
   Serial.setTx(PA2);
@@ -446,6 +474,7 @@ void setup()
   strip.setBrightness(kDefaultBrightness);
   strip.show();
 
+#if ENABLE_PZEM017_SOC 
   Wire.setSDA(PA12);
   Wire.setSCL(PB13);
   Wire.begin();
@@ -455,6 +484,7 @@ void setup()
   } else {
     showOledMessage(F("PZEM-017 OLED"), F("Display ready"));
   }
+#endif
 }
 
 void loop()
@@ -481,6 +511,8 @@ void loop()
   delay(1000);
 #elif ENABLE_RAINBOW_ANIMATION
   showRainbowAnimation();
+#elif ENABLE_LATCH_CONTROL_TEST
+  latchControlTest();
 #else
   delay(1000);
 #endif
