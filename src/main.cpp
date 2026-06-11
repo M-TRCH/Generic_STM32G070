@@ -25,6 +25,8 @@ constexpr uint8_t kDefaultBrightness = 40;
 constexpr uint8_t kDisplayWidth = 128;
 constexpr uint8_t kDisplayHeight = 64;
 constexpr int8_t kDisplayResetPin = -1;
+constexpr const uint8_t *kOledCompactFont = u8g2_font_helvR08_tr;
+constexpr const uint8_t *kOledWideFont = u8g2_font_helvR10_tr;
 // U8g2 uses the 8-bit I2C address form. The 0.96-inch SSD1306 display is
 // typically documented as 7-bit 0x3C, so it is shifted to 0x78 here.
 constexpr uint8_t kDisplayI2cAddress =
@@ -370,41 +372,85 @@ float estimateRemainingCapacityAh(float socPercent)
   return (SOC_BATTERY_CAPACITY_AH * socPercent) / 100.0f;
 }
 
-constexpr int16_t kOledLine1Y = 12;
+constexpr int16_t kOledLine1Y = 11;
 constexpr int16_t kOledLineSpacing = 12;
+constexpr int16_t kOledWideLine1Y = 13;
+constexpr int16_t kOledWideLineSpacing = 18;
+constexpr int16_t kOledLeftPadding = 4;
+constexpr int16_t kOledHeaderHeight = 16;
+constexpr int16_t kOledSensorBodyOffsetY = 2;
 
 int16_t oledLineY(uint8_t lineIndex)
 {
   return static_cast<int16_t>(kOledLine1Y + (lineIndex * kOledLineSpacing));
 }
 
+int16_t oledWideLineY(uint8_t lineIndex)
+{
+  return static_cast<int16_t>(kOledWideLine1Y + (lineIndex * kOledWideLineSpacing));
+}
+
+void drawCenteredText(int16_t y, const char *text)
+{
+  const int16_t textWidth = static_cast<int16_t>(display.getStrWidth(text));
+  int16_t x = static_cast<int16_t>((kDisplayWidth - textWidth) / 2);
+  if (x < 0) {
+    x = 0;
+  }
+
+  display.setCursor(x, y);
+  display.print(text);
+}
+
+void formatFloatText(float value, uint8_t decimals, char *buffer, size_t bufferSize)
+{
+  dtostrf(value, 0, decimals, buffer);
+
+  while (*buffer == ' ') {
+    ++buffer;
+  }
+}
+
 void showOledMessage(const __FlashStringHelper *line1, const __FlashStringHelper *line2)
 {
+  char line1Buffer[24] = {};
+  char line2Buffer[24] = {};
+
+  snprintf(line1Buffer, sizeof(line1Buffer), "%s", reinterpret_cast<const char *>(line1));
+  snprintf(line2Buffer, sizeof(line2Buffer), "%s", reinterpret_cast<const char *>(line2));
+
   display.clearBuffer();
-  display.setFont(u8g2_font_6x12_tf);
-  display.setCursor(0, oledLineY(0));
-  display.print(line1);
-  display.setCursor(0, oledLineY(2));
-  display.print(line2);
+  display.setFont(kOledWideFont);
+  drawCenteredText(oledWideLineY(0), line1Buffer);
+  drawCenteredText(oledWideLineY(2), line2Buffer);
   display.sendBuffer();
 }
 
 void updateOledDisplay(const Sht40Reading &reading)
 {
+  char temperatureValue[12] = {};
+  char humidityValue[12] = {};
+  char temperatureLine[24] = {};
+  char humidityLine[24] = {};
+
+  dtostrf(reading.temperatureC, 0, 2, temperatureValue);
+  dtostrf(reading.humidityPercent, 0, 2, humidityValue);
+
+  snprintf(temperatureLine, sizeof(temperatureLine), "Temp: %s C", temperatureValue);
+  snprintf(humidityLine, sizeof(humidityLine), "Hum : %s %%RH", humidityValue);
+
   display.clearBuffer();
-  display.setFont(u8g2_font_6x12_tf);
-  display.setCursor(0, oledLineY(0));
-  display.print(F("SHT40 Sensor"));
+  display.setFont(kOledWideFont);
+  display.drawBox(0, 0, kDisplayWidth, kOledHeaderHeight);
+  display.setDrawColor(0);
+  drawCenteredText(oledWideLineY(0), "SHT40 Sensor");
+  display.setDrawColor(1);
 
-  display.setCursor(0, oledLineY(1));
-  display.print(F("Temp: "));
-  display.print(reading.temperatureC, 2);
-  display.print(F(" C"));
+  display.setCursor(kOledLeftPadding, static_cast<int16_t>(oledWideLineY(1) + kOledSensorBodyOffsetY));
+  display.print(temperatureLine);
 
-  display.setCursor(0, oledLineY(2));
-  display.print(F("Hum : "));
-  display.print(reading.humidityPercent, 2);
-  display.print(F(" %RH"));
+  display.setCursor(kOledLeftPadding, static_cast<int16_t>(oledWideLineY(2) + kOledSensorBodyOffsetY));
+  display.print(humidityLine);
 
   display.sendBuffer();
 }
@@ -412,7 +458,7 @@ void updateOledDisplay(const Sht40Reading &reading)
 void updateOledDisplay(const Pzem017Reading &reading, float socPercent, float remainingCapacityAh)
 {
   display.clearBuffer();
-  display.setFont(u8g2_font_6x12_tf);
+  display.setFont(kOledCompactFont);
   display.setCursor(0, oledLineY(0));
   display.print(F("V: "));
   display.print(reading.voltage, 2);
