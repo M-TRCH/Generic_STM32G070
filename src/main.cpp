@@ -8,13 +8,14 @@
 HardwareSerial Serial1(PB7, PA9); // RX, TX
 TwoWire Wire1(PB9, PB6);          // SDA, SCL for SHT40
 
-#define LED_BUILTIN     PA10
+#define LED_BUILTIN     PA10  // On-board LED pin (active HIGH)
 #define LATCH_TRIG_PIN  PB3   // Latch trigger pin
 #define LATCH_ULK_PIN   PA3   // Latch unlock pin (active LOW)
 
 constexpr uint16_t kPixelCount = uint16_t(144 * 3); // 144 pixels per strip
 constexpr uint8_t kPixelPin = PA8;
 constexpr uint8_t kDefaultBrightness = 40;
+constexpr uint8_t kStatusLedPin = PA10;
 
 #define OLED_PANEL_096            0
 #define OLED_PANEL_130            1
@@ -33,9 +34,9 @@ constexpr uint8_t kDisplayI2cAddress =
   (OLED_PANEL_TYPE == OLED_PANEL_130) ? OLED_ADDR_130 : static_cast<uint8_t>(OLED_ADDR_096 << 1);
 
 #define ENABLE_PZEM017_SOC          0
-#define ENABLE_SHT40_TEST           1
+#define ENABLE_SHT40_TEST           0
 #define ENABLE_SOLID_COLOR_TEST     0
-#define ENABLE_RAINBOW_ANIMATION    0
+#define ENABLE_RAINBOW_ANIMATION    1
 #define ENABLE_PYTHON_JSON_OUTPUT   0
 #define ENABLE_LATCH_CONTROL_TEST   0
 
@@ -56,6 +57,15 @@ constexpr uint8_t kPzem017Address = 0x01;
 constexpr uint32_t kPzem017BaudRate = 9600;
 constexpr uint8_t kPzem017RegisterCount = 8;
 constexpr uint16_t kPzem017ResponseSize = 3 + (kPzem017RegisterCount * 2) + 2;
+constexpr uint8_t kIna180AnalogPin = PA6;
+constexpr uint16_t kIna180AdcMaxCount = 4095;
+constexpr uint8_t kIna180SampleCount = 16;
+constexpr float kIna180AdcReferenceVoltage = 3.3f;
+constexpr float kIna180Gain = 50.0f;
+constexpr float kIna180ShuntResistanceOhms = 0.010f;
+constexpr float kIna180NoiseFloorAmps = 0.02f;
+constexpr uint16_t kRainbowHueStep = 256;
+constexpr uint32_t kRainbowFrameIntervalMs = 20;
 constexpr uint8_t kSht40Address = 0x44;
 constexpr uint8_t kSht40MeasureHighPrecision = 0xFD;
 
@@ -91,6 +101,15 @@ struct Sht40Reading
   float humidityPercent = NAN;
 };
 
+struct Ina180Reading
+{
+  uint16_t rawAdc = 0;
+  float outputVoltage = NAN;
+  float sensedVoltage = NAN;
+  float shuntVoltage = NAN;
+  float currentAmps = NAN;
+};
+
 // ---------------------------------------------------------------------------
 // RTC (internal RTC of STM32G070CBT6, clocked from LSI ~32 kHz)
 // ---------------------------------------------------------------------------
@@ -108,6 +127,7 @@ constexpr uint32_t kRtcDefaultMinutes = 0;
 constexpr uint32_t kRtcDefaultSeconds = 0;
 
 uint32_t rtcBootCount = 0;
+float ina180ZeroOffsetVoltage = 0.0f;
 
 // Set true once, with the values below, to set the clock from code on boot.
 // After uploading once, set back to false so the RTC keeps running.
@@ -115,9 +135,9 @@ constexpr bool kRtcSetFromCodeOnBoot = false;
 constexpr uint16_t kRtcSetYear = 2026;
 constexpr uint8_t kRtcSetMonth = 6;
 constexpr uint8_t kRtcSetDate = 11;
-constexpr uint8_t kRtcSetHours = 15;
-constexpr uint8_t kRtcSetMinutes = 42;
-constexpr uint8_t kRtcSetSeconds = 0;
+constexpr uint8_t kRtcSetHours = 16;
+constexpr uint8_t kRtcSetMinutes = 23;
+constexpr uint8_t kRtcSetSeconds = 15;
 
 uint16_t crc16Modbus(const uint8_t *data, size_t length)
 {
@@ -212,6 +232,97 @@ void printSht40Reading(const Sht40Reading &reading)
   Serial.print(F("C RH="));
   Serial.print(reading.humidityPercent, 2);
   Serial.println(F("%"));
+}
+
+uint16_t readAveragedAdc(uint8_t pin, uint8_t sampleCount)
+{
+  uint32_t total = 0;
+
+  for (uint8_t index = 0; index < sampleCount; ++index) {
+    total += analogRead(pin);
+  }
+
+  return static_cast<uint16_t>(total / sampleCount);
+}
+
+float adcCountToVoltage(uint16_t rawAdc)
+{
+  return (static_cast<float>(rawAdc) * kIna180AdcReferenceVoltage)
+         / static_cast<float>(kIna180AdcMaxCount);
+}
+
+void calibrateIna180ZeroOffset()
+{
+  constexpr uint8_t kCalibrationSamples = 64;
+  uint16_t rawAdc = readAveragedAdc(kIna180AnalogPin, kCalibrationSamples);
+  ina180ZeroOffsetVoltage = adcCountToVoltage(rawAdc);
+
+  Serial.print(F("INA180 zero offset = "));
+  Serial.print(ina180ZeroOffsetVoltage, 4);
+  Serial.println(F(" V"));
+}
+
+bool readIna180(Ina180Reading &reading)
+{
+  reading.rawAdc = readAveragedAdc(kIna180AnalogPin, kIna180SampleCount);
+  reading.outputVoltage = adcCountToVoltage(reading.rawAdc);
+
+  reading.sensedVoltage = reading.outputVoltage - ina180ZeroOffsetVoltage;
+  reading.shuntVoltage = reading.sensedVoltage / kIna180Gain;
+  reading.currentAmps = reading.shuntVoltage / kIna180ShuntResistanceOhms;
+
+  if (fabsf(reading.currentAmps) < kIna180NoiseFloorAmps) {
+    reading.currentAmps = 0.0f;
+    reading.shuntVoltage = 0.0f;
+    reading.sensedVoltage = 0.0f;
+  }
+
+  return true;
+}
+
+void printIna180Reading(const Ina180Reading &reading)
+{
+  char currentValue[12] = {};
+  char shuntValue[12] = {};
+
+  dtostrf(reading.currentAmps, 0, 3, currentValue);
+  dtostrf(reading.shuntVoltage * 1000.0f, 0, 3, shuntValue);
+
+  Serial.print(F("INA180 OLED I="));
+  Serial.print(currentValue);
+  Serial.print(F("A Vsh="));
+  Serial.print(shuntValue);
+  Serial.print(F("mV ADC="));
+  Serial.print(reading.rawAdc);
+  Serial.print(F(" | RAW ADC="));
+  Serial.print(reading.rawAdc);
+  Serial.print(F(" Vout="));
+  Serial.print(reading.outputVoltage, 4);
+  Serial.print(F("V dV="));
+  Serial.print(reading.sensedVoltage * 1000.0f, 3);
+  Serial.print(F("mV Vshunt="));
+  Serial.print(reading.shuntVoltage * 1000.0f, 3);
+  Serial.print(F("mV I="));
+  Serial.print(reading.currentAmps, 3);
+  Serial.println(F("A"));
+}
+
+void printIna180OledValues(const Ina180Reading &reading)
+{
+  char currentValue[12] = {};
+  char shuntValue[12] = {};
+
+  dtostrf(reading.currentAmps, 0, 3, currentValue);
+  dtostrf(reading.shuntVoltage * 1000.0f, 0, 3, shuntValue);
+
+  Serial.print(F("OLED I   : "));
+  Serial.print(currentValue);
+  Serial.println(F(" A"));
+  Serial.print(F("OLED Vsh : "));
+  Serial.print(shuntValue);
+  Serial.println(F(" mV"));
+  Serial.print(F("OLED ADC : "));
+  Serial.println(reading.rawAdc);
 }
 
 // Override the weak HAL_RTC_MspInit. All clock setup is done manually in
@@ -631,8 +742,7 @@ void showOledMessage(const __FlashStringHelper *line1, const __FlashStringHelper
   display.sendBuffer();
 }
 
-void updateOledDisplay(const Sht40Reading &reading, const RTC_TimeTypeDef &time,
-                       const RTC_DateTypeDef &date)
+void updateOledDisplay(const Sht40Reading &reading, const RTC_TimeTypeDef &time, const RTC_DateTypeDef &date)
 {
   char timeText[12] = {};
   char dateLine[24] = {};
@@ -707,6 +817,41 @@ void updateOledDisplay(const Pzem017Reading &reading, float socPercent, float re
   } else {
     display.print(F("N/A"));
   }
+
+  display.sendBuffer();
+}
+
+void updateOledDisplay(const Ina180Reading &reading)
+{
+  char currentValue[12] = {};
+  char shuntValue[12] = {};
+  char currentLine[24] = {};
+  char shuntLine[24] = {};
+  char adcLine[24] = {};
+
+  dtostrf(reading.currentAmps, 0, 3, currentValue);
+  dtostrf(reading.shuntVoltage * 1000.0f, 0, 3, shuntValue);
+  snprintf(currentLine, sizeof(currentLine), "I   : %s A", currentValue);
+  snprintf(shuntLine, sizeof(shuntLine), "Vsh : %s mV", shuntValue);
+  snprintf(adcLine, sizeof(adcLine), "ADC : %u", static_cast<unsigned>(reading.rawAdc));
+
+  display.clearBuffer();
+
+  // Header bar (inverted), same style as SHT40 mode
+  display.setFont(kOledWideFont);
+  display.drawBox(0, 0, kDisplayWidth, kOledHeaderHeight);
+  display.setDrawColor(0);
+  drawCenteredText(oledWideLineY(0), "INA180");
+  display.setDrawColor(1);
+
+  // Body: match SHT40 spacing so the first line clears the header comfortably.
+  display.setFont(kOledCompactFont);
+  display.setCursor(kOledLeftPadding, oledLineY(2));
+  display.print(currentLine);
+  display.setCursor(kOledLeftPadding, oledLineY(3));
+  display.print(shuntLine);
+  display.setCursor(kOledLeftPadding, oledLineY(4));
+  display.print(adcLine);
 
   display.sendBuffer();
 }
@@ -804,17 +949,24 @@ void showSolidColor(uint8_t red, uint8_t green, uint8_t blue)
 
 void showRainbowAnimation()
 {
-  for (uint16_t offset = 0; offset < 65535; offset += 256) {
-    strip.clear();
+  static uint16_t offset = 0;
+  static uint32_t lastFrameMs = 0;
 
-    for (uint16_t i = 0; i < kPixelCount; ++i) {
-      uint16_t hue = static_cast<uint16_t>(offset + (i * 65535UL / kPixelCount));
-      strip.setPixelColor(i, strip.gamma32(strip.ColorHSV(hue)));
-    }
-
-    strip.show();
-    delay(20);
+  const uint32_t nowMs = millis();
+  if (nowMs - lastFrameMs < kRainbowFrameIntervalMs) {
+    return;
   }
+
+  lastFrameMs = nowMs;
+  strip.clear();
+
+  for (uint16_t i = 0; i < kPixelCount; ++i) {
+    uint16_t hue = static_cast<uint16_t>(offset + (i * 65535UL / kPixelCount));
+    strip.setPixelColor(i, strip.gamma32(strip.ColorHSV(hue)));
+  }
+
+  strip.show();
+  offset = static_cast<uint16_t>(offset + kRainbowHueStep);
 }
 
 void latchControlTest()
@@ -842,10 +994,10 @@ void latchControlTest()
 void setup()
 {
   // Initialize the built-in LED pin as an output
-  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(kStatusLedPin, OUTPUT);
   pinMode(LATCH_TRIG_PIN, OUTPUT);
   pinMode(LATCH_ULK_PIN, INPUT);
-  digitalWrite(LED_BUILTIN, LOW);
+  digitalWrite(kStatusLedPin, LOW);
 
   // debug serial port
   Serial.setRx(PA15);
@@ -860,7 +1012,7 @@ void setup()
   strip.setBrightness(kDefaultBrightness);
   strip.show();
 
-#if ENABLE_PZEM017_SOC || ENABLE_SHT40_TEST
+#if ENABLE_PZEM017_SOC || ENABLE_SHT40_TEST || ENABLE_RAINBOW_ANIMATION
   Wire.setSDA(PA12);
   Wire.setSCL(PB13);
   Wire.begin();
@@ -880,16 +1032,28 @@ void setup()
 #if ENABLE_SHT40_TEST
   if (ENABLE_SHT40_TEST) {
     showOledMessage(F("SHT40 OLED"), F("Display ready"));
+  } else if (ENABLE_RAINBOW_ANIMATION) {
+    showOledMessage(F("INA180 TEST"), F("Display ready"));
   } else {
     showOledMessage(F("PZEM-017 OLED"), F("Display ready"));
   }
 #else
-  showOledMessage(F("PZEM-017 OLED"), F("Display ready"));
+  if (ENABLE_RAINBOW_ANIMATION) {
+    showOledMessage(F("INA180 TEST"), F("Display ready"));
+  } else {
+    showOledMessage(F("PZEM-017 OLED"), F("Display ready"));
+  }
 #endif
 #endif
 
 #if ENABLE_SHT40_TEST
   Wire1.begin();
+#endif
+
+#if ENABLE_RAINBOW_ANIMATION
+  analogReadResolution(12);
+  pinMode(kIna180AnalogPin, INPUT_ANALOG);
+  calibrateIna180ZeroOffset();
 #endif
 
 #if ENABLE_SHT40_TEST
@@ -961,6 +1125,20 @@ void loop()
   showSolidColor(255, 0, 0);
   delay(1000);
 #elif ENABLE_RAINBOW_ANIMATION
+  {
+    static uint32_t lastReadMs = 0;
+
+    if (millis() - lastReadMs >= 500U) {
+      lastReadMs = millis();
+
+      Ina180Reading reading;
+      if (readIna180(reading)) {
+        printIna180Reading(reading);
+        updateOledDisplay(reading);
+        printIna180OledValues(reading);
+      }
+    }
+  }
   showRainbowAnimation();
 #elif ENABLE_LATCH_CONTROL_TEST
   latchControlTest();
