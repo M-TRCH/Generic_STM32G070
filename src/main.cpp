@@ -84,7 +84,20 @@ constexpr uint8_t kAt24c32Address = 0x50;
 constexpr uint16_t kAt24c32RuntimeAddr = 0x0000;
 constexpr uint32_t kRuntimeMarker = 0x52554E54u; // "RUNT"
 constexpr uint8_t kRuntimeRecordSize = 12;       // marker(4) + seconds(4) + ~seconds(4)
-constexpr uint32_t kRuntimeSaveIntervalSec = 3600u; // เขียนลง EEPROM ทุก 1 ชั่วโมง
+constexpr uint32_t kSecondsPerMinute = 60u;
+constexpr uint32_t kSecondsPerHour = 60u * kSecondsPerMinute;
+constexpr uint32_t kSecondsPerDay = 24u * kSecondsPerHour;
+constexpr bool kRuntimeUseTestSavePeriod = true;
+constexpr uint32_t kRuntimeSaveIntervalTestSec = 10u;   // ใช้ทดสอบ: บันทึกทุก 10 วินาที
+constexpr uint32_t kRuntimeSaveIntervalNormalDays = 1u;
+constexpr uint32_t kRuntimeSaveIntervalNormalHours = 0u;
+constexpr uint32_t kRuntimeSaveIntervalNormalMinutes = 0u;
+constexpr uint32_t kRuntimeSaveIntervalNormalSec =
+  (kRuntimeSaveIntervalNormalDays * kSecondsPerDay)
+  + (kRuntimeSaveIntervalNormalHours * kSecondsPerHour)
+  + (kRuntimeSaveIntervalNormalMinutes * kSecondsPerMinute);
+constexpr uint32_t kRuntimeSaveIntervalSec =
+  kRuntimeUseTestSavePeriod ? kRuntimeSaveIntervalTestSec : kRuntimeSaveIntervalNormalSec;
 
 // Set to a valid GPIO pin if your RS485 transceiver needs DE/RE control.
 constexpr int8_t kRs485DirectionPin = -1;
@@ -146,6 +159,7 @@ constexpr uint32_t kRtcDefaultSeconds = 0;
 uint32_t rtcBootCount = 0;
 float ina180ZeroOffsetVoltage = 0.0f;
 uint32_t deviceRuntimeSeconds = 0; // เวลาใช้งานสะสม (วินาที) โหลดจาก EEPROM ตอนบูต
+uint32_t lastRuntimeSeconds = 0;   // ค่า runtime ล่าสุดที่บันทึกสำเร็จลง EEPROM
 
 // Set true once, with the values below, to set the clock from code on boot.
 // After uploading once, set back to false so the RTC keeps running.
@@ -400,7 +414,7 @@ void serviceRuntimeCounter()
 
   if (!initialized) {
     lastTickMs = nowMs;
-    lastSavedSeconds = deviceRuntimeSeconds;
+    lastSavedSeconds = lastRuntimeSeconds;
     initialized = true;
     return;
   }
@@ -416,6 +430,7 @@ void serviceRuntimeCounter()
   if (deviceRuntimeSeconds - lastSavedSeconds >= kRuntimeSaveIntervalSec) {
     if (saveRuntimeSeconds(deviceRuntimeSeconds)) {
       lastSavedSeconds = deviceRuntimeSeconds;
+      lastRuntimeSeconds = deviceRuntimeSeconds;
       Serial.print(F("Runtime saved to EEPROM: "));
       Serial.print(deviceRuntimeSeconds);
       Serial.println(F(" s"));
@@ -1310,167 +1325,181 @@ void runTftTest()
 // โหมด Dashboard: รวมค่า RTC + SHT40 (อ้างอิงโหมด SHT40_TEST) และกระแส INA180
 // (อ้างอิงโหมด RAINBOW_ANIMATION) มาแสดงบนจอ TFT 3.5" แทนจอ OLED เดิม
 // ---------------------------------------------------------------------------
-constexpr int16_t kTftRowTempY = 70;
-constexpr int16_t kTftRowHumY = 110;
-constexpr int16_t kTftRowTemp31Y = 150;
-constexpr int16_t kTftRowHum31Y = 190;
-constexpr int16_t kTftRowCurrentY = 230;
-constexpr int16_t kTftRowRuntimeY = 280;
-constexpr int16_t kTftValueX = 470;
+struct TftDashboardField
+{
+  int16_t x;
+  int16_t y;
+  int16_t w;
+  int16_t h;
+  int16_t labelX;
+  int16_t labelY;
+  int16_t valueX;
+  int16_t valueY;
+  uint16_t accentColor;
+  const char *label;
+};
+
+constexpr uint16_t kTftDashboardBg = TFT_BLACK;
+constexpr uint16_t kTftPanelFill = 0x1082;
+constexpr uint16_t kTftPanelBorder = 0x31A6;
+constexpr uint16_t kTftHeaderFill = 0x0106;
+constexpr uint16_t kTftHeaderBorder = 0x2A69;
+constexpr uint16_t kTftHeaderValue = TFT_SKYBLUE;
+
+constexpr TftDashboardField kRoomTempField = {18, 86, 216, 76, 32, 100, 220, 126, TFT_YELLOW, "ROOM TEMP"};
+constexpr TftDashboardField kRoomHumField = {18, 174, 216, 76, 32, 188, 220, 214, TFT_GOLD, "ROOM HUM"};
+constexpr TftDashboardField kRefrigTempField = {246, 86, 216, 76, 260, 100, 448, 126, TFT_GREENYELLOW, "REFRIG TEMP"};
+constexpr TftDashboardField kRefrigHumField = {246, 174, 216, 76, 260, 188, 448, 214, TFT_CYAN, "REFRIG HUM"};
+constexpr TftDashboardField kCurrentField = {18, 262, 216, 44, 32, 274, 220, 289, TFT_ORANGE, "CURRENT"};
+constexpr TftDashboardField kLastRuntimeField = {246, 262, 216, 44, 260, 274, 448, 289, TFT_MAGENTA, "LAST RUNTIME"};
+
+void tftDashboardDrawPanel(const TftDashboardField &field)
+{
+  tft.fillRoundRect(field.x, field.y, field.w, field.h, 10, kTftPanelFill);
+  tft.drawRoundRect(field.x, field.y, field.w, field.h, 10, kTftPanelBorder);
+  tft.fillRect(field.x + 1, field.y + 1, 5, field.h - 2, field.accentColor);
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_LIGHTGREY, kTftPanelFill);
+  tft.drawString(field.label, field.labelX, field.labelY, 2);
+}
 
 void tftDashboardStaticLayout()
 {
-  tft.fillScreen(TFT_BLACK);
-  tft.drawFastHLine(0, 56, tft.width(), TFT_DARKGREY);
+  tft.fillScreen(kTftDashboardBg);
+
+  tft.fillRoundRect(12, 10, tft.width() - 24, 62, 14, kTftHeaderFill);
+  tft.drawRoundRect(12, 10, tft.width() - 24, 62, 14, kTftHeaderBorder);
+  tft.drawFastHLine(18, 78, tft.width() - 36, TFT_DARKGREY);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString("Temp 40", 10, kTftRowTempY, 4);
-  tft.drawString("Hum 40", 10, kTftRowHumY, 4);
-  tft.drawString("Temp 31", 10, kTftRowTemp31Y, 4);
-  tft.drawString("Hum 31", 10, kTftRowHum31Y, 4);
-  tft.drawString("Current", 10, kTftRowCurrentY, 4);
-  tft.drawString("Runtime", 10, kTftRowRuntimeY, 4);
+  tft.setTextColor(TFT_WHITE, kTftHeaderFill);
+  tft.drawString("LGS TS Cool", 28, 18, 4);
+  tft.setTextColor(TFT_DARKGREY, kTftHeaderFill);
+  tft.drawString("CURRENT RUNTIME", 30, 50, 2);
+
+  tftDashboardDrawPanel(kRoomTempField);
+  tftDashboardDrawPanel(kRoomHumField);
+  tftDashboardDrawPanel(kRefrigTempField);
+  tftDashboardDrawPanel(kRefrigHumField);
+  tftDashboardDrawPanel(kCurrentField);
+  tftDashboardDrawPanel(kLastRuntimeField);
 }
 
-// format runtime เป็น Dd HH:MM (เมื่อมีวัน) หรือ HH:MM:SS (ต่ำกว่าวัน)
+// format runtime สำหรับ TFT เป็นรูปแบบมีหน่วยชัดเจน เช่น 1d 02h 15m หรือ 03h 12m 09s
 void formatRuntime(uint32_t seconds, char *buffer, size_t bufferSize)
 {
-  const uint32_t days = seconds / 86400U;
-  const uint32_t hours = (seconds % 86400U) / 3600U;
-  const uint32_t minutes = (seconds % 3600U) / 60U;
-  const uint32_t secs = seconds % 60U;
+  const uint32_t days = seconds / kSecondsPerDay;
+  const uint32_t hours = (seconds % kSecondsPerDay) / kSecondsPerHour;
+  const uint32_t minutes = (seconds % kSecondsPerHour) / kSecondsPerMinute;
+  const uint32_t secs = seconds % kSecondsPerMinute;
 
   if (days > 0U) {
-    snprintf(buffer, bufferSize, "%lud %02lu:%02lu",
+    snprintf(buffer, bufferSize, "%lud %02luh %02lum",
              static_cast<unsigned long>(days), static_cast<unsigned long>(hours),
              static_cast<unsigned long>(minutes));
   } else {
-    snprintf(buffer, bufferSize, "%02lu:%02lu:%02lu",
+    snprintf(buffer, bufferSize, "%02luh %02lum %02lus",
              static_cast<unsigned long>(hours), static_cast<unsigned long>(minutes),
              static_cast<unsigned long>(secs));
   }
 }
 
-void tftDashboardDrawValue(int16_t y, const char *value, uint16_t color)
+void tftDashboardDrawFieldValue(const TftDashboardField &field, const char *value, uint16_t color)
 {
-  // ล้างพื้นที่ค่าก่อน (กันเลขเก่าค้าง) แล้ววาดชิดขวา
-  tft.fillRect(200, y - 4, tft.width() - 200, 36, TFT_BLACK);
+  const int16_t clearX = field.x + 14;
+  const int16_t clearY = field.y + 26;
+  const int16_t clearW = field.w - 24;
+  const int16_t clearH = field.h - 32;
+
+  tft.fillRect(clearX, clearY, clearW, clearH, kTftPanelFill);
   tft.setTextDatum(TR_DATUM);
-  tft.setTextColor(color, TFT_BLACK);
-  tft.drawString(value, kTftValueX, y, 4);
+  tft.setTextColor(color, kTftPanelFill);
+  tft.drawString(value, field.valueX, field.valueY, 4);
 }
 
 // วาดค่าเฉพาะเมื่อข้อความเปลี่ยน (ลดทราฟิก SPI + กันกระพริบ)
-void tftDashboardDrawValueIfChanged(int16_t y, const char *value, uint16_t color,
-                                    char *cache, size_t cacheSize)
+void tftDashboardDrawValueIfChanged(const TftDashboardField &field, const char *value,
+                                    uint16_t color, char *cache, size_t cacheSize)
 {
   if (strncmp(cache, value, cacheSize) == 0) {
     return;
   }
   snprintf(cache, cacheSize, "%s", value);
-  tftDashboardDrawValue(y, value, color);
+  tftDashboardDrawFieldValue(field, value, color);
 }
 
-void updateTftDashboard(const Sht40Reading &sht, const Sht40Reading &sht31, const Ina180Reading &ina,
-                        const RTC_TimeTypeDef &time, const RTC_DateTypeDef &date, bool rtcOk,
-                        uint32_t runtimeSeconds)
+void updateTftDashboard(const Sht40Reading &sht, const Sht40Reading &sht31,
+                        const Ina180Reading &ina, uint32_t runtimeSeconds,
+                        uint32_t savedRuntimeSeconds)
 {
   char buffer[24] = {};
-  static char timeCache[16] = {};
-  static char dateCache[16] = {};
+  char value[16] = {};
+  static char headerRuntimeCache[16] = {};
   static char tempCache[16] = {};
   static char humCache[16] = {};
   static char temp31Cache[16] = {};
   static char hum31Cache[16] = {};
   static char currentCache[16] = {};
-  static char runtimeCache[16] = {};
+  static char lastRuntimeCache[16] = {};
 
-  // แถบบน: เวลา (ใหญ่) วาดเฉพาะเมื่อเปลี่ยน
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  if (rtcOk) {
-    snprintf(buffer, sizeof(buffer), "%02u:%02u:%02u",
-             static_cast<unsigned>(time.Hours), static_cast<unsigned>(time.Minutes),
-             static_cast<unsigned>(time.Seconds));
-  } else {
-    snprintf(buffer, sizeof(buffer), "--:--:--");
-  }
-  if (strncmp(timeCache, buffer, sizeof(timeCache)) != 0) {
-    snprintf(timeCache, sizeof(timeCache), "%s", buffer);
-    tft.fillRect(0, 0, 320, 54, TFT_BLACK);
-    tft.drawString(buffer, 10, 6, 6);
-  }
-
-  // วันที่ (ขวา) วาดเฉพาะเมื่อเปลี่ยน
-  if (rtcOk) {
-    snprintf(buffer, sizeof(buffer), "%02u/%02u/20%02u",
-             static_cast<unsigned>(date.Date), static_cast<unsigned>(date.Month),
-             static_cast<unsigned>(date.Year));
-  } else {
-    snprintf(buffer, sizeof(buffer), "--/--/----");
-  }
-  if (strncmp(dateCache, buffer, sizeof(dateCache)) != 0) {
-    snprintf(dateCache, sizeof(dateCache), "%s", buffer);
-    tft.fillRect(330, 0, tft.width() - 330, 54, TFT_BLACK);
+  formatRuntime(runtimeSeconds, buffer, sizeof(buffer));
+  if (strncmp(headerRuntimeCache, buffer, sizeof(headerRuntimeCache)) != 0) {
+    snprintf(headerRuntimeCache, sizeof(headerRuntimeCache), "%s", buffer);
+    tft.fillRect(250, 18, 190, 38, kTftHeaderFill);
     tft.setTextDatum(TR_DATUM);
-    tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    tft.drawString(buffer, kTftValueX, 20, 4);
+    tft.setTextColor(kTftHeaderValue, kTftHeaderFill);
+    tft.drawString(buffer, 434, 22, 4);
   }
 
-  // อุณหภูมิ
   if (isfinite(sht.temperatureC)) {
-    char value[12] = {};
     dtostrf(sht.temperatureC, 0, 2, value);
     snprintf(buffer, sizeof(buffer), "%s C", value);
   } else {
     snprintf(buffer, sizeof(buffer), "-- C");
   }
-  tftDashboardDrawValueIfChanged(kTftRowTempY, buffer, TFT_YELLOW, tempCache, sizeof(tempCache));
+  tftDashboardDrawValueIfChanged(kRoomTempField, buffer, kRoomTempField.accentColor,
+                                 tempCache, sizeof(tempCache));
 
-  // ความชื้น
   if (isfinite(sht.humidityPercent)) {
-    char value[12] = {};
     dtostrf(sht.humidityPercent, 0, 2, value);
     snprintf(buffer, sizeof(buffer), "%s %%", value);
   } else {
     snprintf(buffer, sizeof(buffer), "-- %%");
   }
-  tftDashboardDrawValueIfChanged(kTftRowHumY, buffer, TFT_YELLOW, humCache, sizeof(humCache));
+  tftDashboardDrawValueIfChanged(kRoomHumField, buffer, kRoomHumField.accentColor,
+                                 humCache, sizeof(humCache));
 
-  // อุณหภูมิ SHT31 (บัส Wire)
   if (isfinite(sht31.temperatureC)) {
-    char value[12] = {};
     dtostrf(sht31.temperatureC, 0, 2, value);
     snprintf(buffer, sizeof(buffer), "%s C", value);
   } else {
     snprintf(buffer, sizeof(buffer), "-- C");
   }
-  tftDashboardDrawValueIfChanged(kTftRowTemp31Y, buffer, TFT_GREENYELLOW, temp31Cache, sizeof(temp31Cache));
+  tftDashboardDrawValueIfChanged(kRefrigTempField, buffer, kRefrigTempField.accentColor,
+                                 temp31Cache, sizeof(temp31Cache));
 
-  // ความชื้น SHT31 (บัส Wire)
   if (isfinite(sht31.humidityPercent)) {
-    char value[12] = {};
     dtostrf(sht31.humidityPercent, 0, 2, value);
     snprintf(buffer, sizeof(buffer), "%s %%", value);
   } else {
     snprintf(buffer, sizeof(buffer), "-- %%");
   }
-  tftDashboardDrawValueIfChanged(kTftRowHum31Y, buffer, TFT_GREENYELLOW, hum31Cache, sizeof(hum31Cache));
+  tftDashboardDrawValueIfChanged(kRefrigHumField, buffer, kRefrigHumField.accentColor,
+                                 hum31Cache, sizeof(hum31Cache));
 
-  // กระแส INA180
   if (isfinite(ina.currentAmps)) {
-    char value[12] = {};
     dtostrf(ina.currentAmps, 0, 3, value);
     snprintf(buffer, sizeof(buffer), "%s A", value);
   } else {
     snprintf(buffer, sizeof(buffer), "-- A");
   }
-  tftDashboardDrawValueIfChanged(kTftRowCurrentY, buffer, TFT_ORANGE, currentCache, sizeof(currentCache));
+  tftDashboardDrawValueIfChanged(kCurrentField, buffer, kCurrentField.accentColor,
+                                 currentCache, sizeof(currentCache));
 
-  // เวลาใช้งานสะสม (จาก EEPROM AT24C32D)
-  formatRuntime(runtimeSeconds, buffer, sizeof(buffer));
-  tftDashboardDrawValueIfChanged(kTftRowRuntimeY, buffer, TFT_SKYBLUE, runtimeCache, sizeof(runtimeCache));
+  formatRuntime(savedRuntimeSeconds, buffer, sizeof(buffer));
+  tftDashboardDrawValueIfChanged(kLastRuntimeField, buffer, kLastRuntimeField.accentColor,
+                                 lastRuntimeCache, sizeof(lastRuntimeCache));
 }
 #endif // ENABLE_TFT_DASHBOARD
 
@@ -1574,14 +1603,28 @@ void setup()
 
   // โหลดเวลาใช้งานสะสมจาก EEPROM AT24C32D เพื่อนับต่อจากของเดิม
   if (loadRuntimeSeconds(deviceRuntimeSeconds)) {
+    lastRuntimeSeconds = deviceRuntimeSeconds;
     Serial.print(F("Runtime loaded from EEPROM: "));
     Serial.print(deviceRuntimeSeconds);
     Serial.println(F(" s"));
   } else {
     deviceRuntimeSeconds = 0;
+    lastRuntimeSeconds = 0;
     Serial.println(F("Runtime EEPROM empty/invalid, starting at 0"));
-    saveRuntimeSeconds(deviceRuntimeSeconds);
+    if (saveRuntimeSeconds(deviceRuntimeSeconds)) {
+      lastRuntimeSeconds = deviceRuntimeSeconds;
+    }
   }
+
+  Serial.print(F("Runtime save period = "));
+  Serial.print(kRuntimeSaveIntervalSec);
+  Serial.print(F(" s ("));
+  Serial.print(kRuntimeSaveIntervalSec / kSecondsPerDay);
+  Serial.print(F("d "));
+  Serial.print((kRuntimeSaveIntervalSec % kSecondsPerDay) / kSecondsPerHour);
+  Serial.print(F("h "));
+  Serial.print((kRuntimeSaveIntervalSec % kSecondsPerHour) / kSecondsPerMinute);
+  Serial.println(F("m)"));
 
   if (initRtc()) {
     rtcBootCount = incrementRtcBootCount();
@@ -1702,14 +1745,10 @@ void loop()
     if (nowMs - lastFastMs >= kFastIntervalMs) {
       lastFastMs = nowMs;
 
-      RTC_TimeTypeDef time = {};
-      RTC_DateTypeDef date = {};
-      bool rtcOk = readRtc(time, date);
-
       Ina180Reading ina;
       readIna180(ina);
 
-      updateTftDashboard(sht, sht31, ina, time, date, rtcOk, deviceRuntimeSeconds);
+      updateTftDashboard(sht, sht31, ina, deviceRuntimeSeconds, lastRuntimeSeconds);
     }
   }
   showRainbowAnimation();
