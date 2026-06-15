@@ -36,9 +36,14 @@ constexpr uint8_t kDisplayI2cAddress =
 #define ENABLE_PZEM017_SOC          0
 #define ENABLE_SHT40_TEST           0
 #define ENABLE_SOLID_COLOR_TEST     0
-#define ENABLE_RAINBOW_ANIMATION    1
+#define ENABLE_RAINBOW_ANIMATION    0
 #define ENABLE_PYTHON_JSON_OUTPUT   0
 #define ENABLE_LATCH_CONTROL_TEST   0
+#define ENABLE_TFT_ILI9488_TEST     1
+
+#if ENABLE_TFT_ILI9488_TEST
+#include <TFT_eSPI.h>
+#endif
 
 #define SOC_BATTERY_CAPACITY_AH   18.0f
 #define SOC_CHARGE_MAX_VOLTAGE    29.2f
@@ -991,6 +996,121 @@ void latchControlTest()
   }
 }
 
+#if ENABLE_TFT_ILI9488_TEST
+// ---------------------------------------------------------------------------
+// ทดสอบจอ TFT 3.5" ILI9488 + ทัช XPT2046 (บัส SPI1 ร่วมกัน)
+// กำหนดขา/ไดรเวอร์ทั้งหมดผ่าน build_flags ใน platformio.ini
+//
+//   TFT_SCK / T_CLK  PA5   |  TFT_MOSI / T_DIN PB5  |  T_DO (MISO) PB4
+//   TFT_CS  PB14  |  TFT_DC/RS PC7  |  TFT_RESET PC6
+//   TFT_LED PB0   |  T_CS PB15
+// ---------------------------------------------------------------------------
+TFT_eSPI tft = TFT_eSPI();
+
+constexpr uint8_t kTftBacklightPin = PB0;
+
+// ค่าคาลิเบรตทัช (ค่าเริ่มต้นแบบประมาณการ ปรับได้จากผล touch_calibrate)
+// ลำดับ: { xMin, xMax, yMin, yMax, rotation }
+uint16_t tftTouchCalData[5] = { 300, 3600, 300, 3600, 2 };
+
+void tftDrawColorBars()
+{
+  const uint16_t colors[] = {
+    TFT_RED, TFT_GREEN, TFT_BLUE, TFT_YELLOW,
+    TFT_CYAN, TFT_MAGENTA, TFT_WHITE, TFT_BLACK,
+  };
+  const uint8_t count = sizeof(colors) / sizeof(colors[0]);
+  const int16_t barWidth = tft.width() / count;
+
+  for (uint8_t i = 0; i < count; ++i) {
+    tft.fillRect(i * barWidth, 0, barWidth, tft.height(), colors[i]);
+  }
+}
+
+void tftDrawHeader()
+{
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextSize(1);
+  tft.drawString("ILI9488 + XPT2046 TEST", tft.width() / 2, 8, 4);
+  tft.drawString("Touch the screen to draw", tft.width() / 2, 40, 2);
+}
+
+void tftRunStartupSequence()
+{
+  // 1) เติมสีพื้นทีละสีเพื่อตรวจ dead pixel และความถูกต้องของสี
+  const uint16_t fillColors[] = { TFT_RED, TFT_GREEN, TFT_BLUE, TFT_WHITE };
+  for (uint16_t color : fillColors) {
+    tft.fillScreen(color);
+    delay(400);
+  }
+
+  // 2) แถบสีตรวจการไล่ลำดับสี (RGB ordering)
+  tftDrawColorBars();
+  delay(1200);
+
+  // 3) ทดสอบข้อความและฟอนต์
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.setCursor(10, 10, 4);
+  tft.println("Font test 1234567890");
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.println("ILI9488 3.5 inch");
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.printf("Size: %d x %d\n", tft.width(), tft.height());
+  delay(1500);
+}
+
+void initTftTest()
+{
+  SPI.setSCLK(PA5);
+  SPI.setMOSI(PB5);
+  SPI.setMISO(PB4);
+
+  pinMode(kTftBacklightPin, OUTPUT);
+  digitalWrite(kTftBacklightPin, HIGH);
+
+  tft.init();
+  tft.setRotation(1); // แนวนอน (480 x 320)
+  tft.setTouch(tftTouchCalData);
+
+  Serial.print(F("Display size: "));
+  Serial.print(tft.width());
+  Serial.print('x');
+  Serial.println(tft.height());
+
+  tftRunStartupSequence();
+  tftDrawHeader();
+}
+
+void runTftTest()
+{
+  uint16_t touchX = 0;
+  uint16_t touchY = 0;
+
+  // คืนค่า true เมื่อมีการสัมผัสจอ
+  if (tft.getTouch(&touchX, &touchY)) {
+    // วาดวงกลมตรงตำแหน่งที่แตะ
+    tft.fillCircle(touchX, touchY, 4, TFT_RED);
+
+    // แสดงพิกัดมุมล่างซ้าย
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setTextDatum(BL_DATUM);
+    char buffer[32];
+    snprintf(buffer, sizeof(buffer), "X:%4u Y:%4u   ", touchX, touchY);
+    tft.drawString(buffer, 4, tft.height() - 4, 2);
+
+    Serial.print(F("Touch X="));
+    Serial.print(touchX);
+    Serial.print(F(" Y="));
+    Serial.println(touchY);
+
+    delay(10);
+  }
+}
+#endif // ENABLE_TFT_ILI9488_TEST
+
 void setup()
 {
   // Initialize the built-in LED pin as an output
@@ -1074,6 +1194,10 @@ void setup()
     Serial.println(F("RTC init failed"));
   }
 #endif
+
+#if ENABLE_TFT_ILI9488_TEST
+  initTftTest();
+#endif
 }
 
 void loop()
@@ -1142,6 +1266,8 @@ void loop()
   showRainbowAnimation();
 #elif ENABLE_LATCH_CONTROL_TEST
   latchControlTest();
+#elif ENABLE_TFT_ILI9488_TEST
+  runTftTest();
 #else
   delay(1000);
 #endif
