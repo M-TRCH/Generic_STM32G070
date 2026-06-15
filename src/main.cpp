@@ -79,6 +79,13 @@ constexpr uint8_t kSht40MeasureHighPrecision = 0xFD;
 constexpr uint8_t kSht31Address = 0x44;
 constexpr uint16_t kSht31MeasureHighRepeatability = 0x2400;
 
+// AT24C32D EEPROM บนบัส Wire1 (ช่องเดียวกับ SHT40) ใช้เก็บ runtime สะสม
+constexpr uint8_t kAt24c32Address = 0x50;
+constexpr uint16_t kAt24c32RuntimeAddr = 0x0000;
+constexpr uint32_t kRuntimeMarker = 0x52554E54u; // "RUNT"
+constexpr uint8_t kRuntimeRecordSize = 12;       // marker(4) + seconds(4) + ~seconds(4)
+constexpr uint32_t kRuntimeSaveIntervalSec = 3600u; // เขียนลง EEPROM ทุก 1 ชั่วโมง
+
 // Set to a valid GPIO pin if your RS485 transceiver needs DE/RE control.
 constexpr int8_t kRs485DirectionPin = -1;
 
@@ -138,6 +145,7 @@ constexpr uint32_t kRtcDefaultSeconds = 0;
 
 uint32_t rtcBootCount = 0;
 float ina180ZeroOffsetVoltage = 0.0f;
+uint32_t deviceRuntimeSeconds = 0; // เวลาใช้งานสะสม (วินาที) โหลดจาก EEPROM ตอนบูต
 
 // Set true once, with the values below, to set the clock from code on boot.
 // After uploading once, set back to false so the RTC keeps running.
@@ -293,6 +301,128 @@ void printSht31Reading(const Sht40Reading &reading)
   Serial.print(F("C RH="));
   Serial.print(reading.humidityPercent, 2);
   Serial.println(F("%"));
+}
+
+// ---------------------------------------------------------------------------
+// AT24C32D EEPROM (บัส Wire1 ช่องเดียวกับ SHT40, 16-bit word address)
+// ---------------------------------------------------------------------------
+bool eepromWriteBytes(uint16_t memAddr, const uint8_t *data, size_t length)
+{
+  Wire1.beginTransmission(kAt24c32Address);
+  Wire1.write(static_cast<uint8_t>(memAddr >> 8));
+  Wire1.write(static_cast<uint8_t>(memAddr & 0xFF));
+  for (size_t i = 0; i < length; ++i) {
+    Wire1.write(data[i]);
+  }
+  if (Wire1.endTransmission() != 0) {
+    return false;
+  }
+
+  delay(6); // write cycle time ~5ms
+  return true;
+}
+
+bool eepromReadBytes(uint16_t memAddr, uint8_t *data, size_t length)
+{
+  Wire1.beginTransmission(kAt24c32Address);
+  Wire1.write(static_cast<uint8_t>(memAddr >> 8));
+  Wire1.write(static_cast<uint8_t>(memAddr & 0xFF));
+  if (Wire1.endTransmission(false) != 0) { // repeated start
+    return false;
+  }
+
+  if (Wire1.requestFrom(static_cast<int>(kAt24c32Address), static_cast<int>(length)) != static_cast<int>(length)) {
+    return false;
+  }
+
+  for (size_t i = 0; i < length; ++i) {
+    if (!Wire1.available()) {
+      return false;
+    }
+    data[i] = static_cast<uint8_t>(Wire1.read());
+  }
+
+  return true;
+}
+
+uint32_t unpackUint32Le(const uint8_t *p)
+{
+  return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8)
+         | (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+}
+
+void packUint32Le(uint8_t *p, uint32_t value)
+{
+  p[0] = static_cast<uint8_t>(value & 0xFF);
+  p[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+  p[2] = static_cast<uint8_t>((value >> 16) & 0xFF);
+  p[3] = static_cast<uint8_t>((value >> 24) & 0xFF);
+}
+
+// อ่าน runtime สะสมจาก EEPROM; ตรวจ marker + complement ของค่า เพื่อกันข้อมูลเสีย
+bool loadRuntimeSeconds(uint32_t &outSeconds)
+{
+  uint8_t buffer[kRuntimeRecordSize] = {};
+  if (!eepromReadBytes(kAt24c32RuntimeAddr, buffer, sizeof(buffer))) {
+    return false;
+  }
+
+  uint32_t marker = unpackUint32Le(buffer);
+  uint32_t seconds = unpackUint32Le(buffer + 4);
+  uint32_t check = unpackUint32Le(buffer + 8);
+
+  if (marker != kRuntimeMarker || check != ~seconds) {
+    return false;
+  }
+
+  outSeconds = seconds;
+  return true;
+}
+
+bool saveRuntimeSeconds(uint32_t seconds)
+{
+  uint8_t buffer[kRuntimeRecordSize] = {};
+  packUint32Le(buffer, kRuntimeMarker);
+  packUint32Le(buffer + 4, seconds);
+  packUint32Le(buffer + 8, ~seconds);
+  return eepromWriteBytes(kAt24c32RuntimeAddr, buffer, sizeof(buffer));
+}
+
+// นับเวลาใช้งานสะสมจาก millis() และเขียนลง EEPROM ทุก kRuntimeSaveIntervalSec
+void serviceRuntimeCounter()
+{
+  static bool initialized = false;
+  static uint32_t lastTickMs = 0;
+  static uint32_t carryMs = 0;
+  static uint32_t lastSavedSeconds = 0;
+
+  const uint32_t nowMs = millis();
+
+  if (!initialized) {
+    lastTickMs = nowMs;
+    lastSavedSeconds = deviceRuntimeSeconds;
+    initialized = true;
+    return;
+  }
+
+  carryMs += (nowMs - lastTickMs); // unsigned subtraction รองรับ millis overflow
+  lastTickMs = nowMs;
+
+  if (carryMs >= 1000U) {
+    deviceRuntimeSeconds += carryMs / 1000U;
+    carryMs %= 1000U;
+  }
+
+  if (deviceRuntimeSeconds - lastSavedSeconds >= kRuntimeSaveIntervalSec) {
+    if (saveRuntimeSeconds(deviceRuntimeSeconds)) {
+      lastSavedSeconds = deviceRuntimeSeconds;
+      Serial.print(F("Runtime saved to EEPROM: "));
+      Serial.print(deviceRuntimeSeconds);
+      Serial.println(F(" s"));
+    } else {
+      Serial.println(F("Runtime EEPROM write failed"));
+    }
+  }
 }
 
 uint16_t readAveragedAdc(uint8_t pin, uint8_t sampleCount)
@@ -1184,7 +1314,8 @@ constexpr int16_t kTftRowTempY = 70;
 constexpr int16_t kTftRowHumY = 110;
 constexpr int16_t kTftRowTemp31Y = 150;
 constexpr int16_t kTftRowHum31Y = 190;
-constexpr int16_t kTftRowCurrentY = 240;
+constexpr int16_t kTftRowCurrentY = 230;
+constexpr int16_t kTftRowRuntimeY = 280;
 constexpr int16_t kTftValueX = 470;
 
 void tftDashboardStaticLayout()
@@ -1199,6 +1330,26 @@ void tftDashboardStaticLayout()
   tft.drawString("Temp 31", 10, kTftRowTemp31Y, 4);
   tft.drawString("Hum 31", 10, kTftRowHum31Y, 4);
   tft.drawString("Current", 10, kTftRowCurrentY, 4);
+  tft.drawString("Runtime", 10, kTftRowRuntimeY, 4);
+}
+
+// format runtime เป็น Dd HH:MM (เมื่อมีวัน) หรือ HH:MM:SS (ต่ำกว่าวัน)
+void formatRuntime(uint32_t seconds, char *buffer, size_t bufferSize)
+{
+  const uint32_t days = seconds / 86400U;
+  const uint32_t hours = (seconds % 86400U) / 3600U;
+  const uint32_t minutes = (seconds % 3600U) / 60U;
+  const uint32_t secs = seconds % 60U;
+
+  if (days > 0U) {
+    snprintf(buffer, bufferSize, "%lud %02lu:%02lu",
+             static_cast<unsigned long>(days), static_cast<unsigned long>(hours),
+             static_cast<unsigned long>(minutes));
+  } else {
+    snprintf(buffer, bufferSize, "%02lu:%02lu:%02lu",
+             static_cast<unsigned long>(hours), static_cast<unsigned long>(minutes),
+             static_cast<unsigned long>(secs));
+  }
 }
 
 void tftDashboardDrawValue(int16_t y, const char *value, uint16_t color)
@@ -1222,7 +1373,8 @@ void tftDashboardDrawValueIfChanged(int16_t y, const char *value, uint16_t color
 }
 
 void updateTftDashboard(const Sht40Reading &sht, const Sht40Reading &sht31, const Ina180Reading &ina,
-                        const RTC_TimeTypeDef &time, const RTC_DateTypeDef &date, bool rtcOk)
+                        const RTC_TimeTypeDef &time, const RTC_DateTypeDef &date, bool rtcOk,
+                        uint32_t runtimeSeconds)
 {
   char buffer[24] = {};
   static char timeCache[16] = {};
@@ -1232,6 +1384,7 @@ void updateTftDashboard(const Sht40Reading &sht, const Sht40Reading &sht31, cons
   static char temp31Cache[16] = {};
   static char hum31Cache[16] = {};
   static char currentCache[16] = {};
+  static char runtimeCache[16] = {};
 
   // แถบบน: เวลา (ใหญ่) วาดเฉพาะเมื่อเปลี่ยน
   tft.setTextDatum(TL_DATUM);
@@ -1314,6 +1467,10 @@ void updateTftDashboard(const Sht40Reading &sht, const Sht40Reading &sht31, cons
     snprintf(buffer, sizeof(buffer), "-- A");
   }
   tftDashboardDrawValueIfChanged(kTftRowCurrentY, buffer, TFT_ORANGE, currentCache, sizeof(currentCache));
+
+  // เวลาใช้งานสะสม (จาก EEPROM AT24C32D)
+  formatRuntime(runtimeSeconds, buffer, sizeof(buffer));
+  tftDashboardDrawValueIfChanged(kTftRowRuntimeY, buffer, TFT_SKYBLUE, runtimeCache, sizeof(runtimeCache));
 }
 #endif // ENABLE_TFT_DASHBOARD
 
@@ -1415,6 +1572,17 @@ void setup()
   pinMode(kIna180AnalogPin, INPUT_ANALOG);
   calibrateIna180ZeroOffset();
 
+  // โหลดเวลาใช้งานสะสมจาก EEPROM AT24C32D เพื่อนับต่อจากของเดิม
+  if (loadRuntimeSeconds(deviceRuntimeSeconds)) {
+    Serial.print(F("Runtime loaded from EEPROM: "));
+    Serial.print(deviceRuntimeSeconds);
+    Serial.println(F(" s"));
+  } else {
+    deviceRuntimeSeconds = 0;
+    Serial.println(F("Runtime EEPROM empty/invalid, starting at 0"));
+    saveRuntimeSeconds(deviceRuntimeSeconds);
+  }
+
   if (initRtc()) {
     rtcBootCount = incrementRtcBootCount();
     Serial.print(F("RTC boot count: "));
@@ -1510,6 +1678,8 @@ void loop()
 
     const uint32_t nowMs = millis();
 
+    serviceRuntimeCounter(); // นับเวลาใช้งานสะสม + บันทึก EEPROM ทุก 1 ชั่วโมง
+
     if (nowMs - lastSlowMs >= kSlowIntervalMs) {
       lastSlowMs = nowMs;
       if (readSht40(sht)) {
@@ -1539,7 +1709,7 @@ void loop()
       Ina180Reading ina;
       readIna180(ina);
 
-      updateTftDashboard(sht, sht31, ina, time, date, rtcOk);
+      updateTftDashboard(sht, sht31, ina, time, date, rtcOk, deviceRuntimeSeconds);
     }
   }
   showRainbowAnimation();
