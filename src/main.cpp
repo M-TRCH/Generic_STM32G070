@@ -1345,13 +1345,15 @@ constexpr uint16_t kTftPanelBorder = 0x31A6;
 constexpr uint16_t kTftHeaderFill = 0x0106;
 constexpr uint16_t kTftHeaderBorder = 0x2A69;
 constexpr uint16_t kTftHeaderValue = TFT_SKYBLUE;
+constexpr int16_t kTftHeaderRuntimeLabelY = 48;
+constexpr int16_t kTftHeaderRuntimeValueY = 46;
 
-constexpr TftDashboardField kRoomTempField = {18, 86, 216, 76, 32, 100, 220, 126, TFT_YELLOW, "ROOM TEMP"};
-constexpr TftDashboardField kRoomHumField = {18, 174, 216, 76, 32, 188, 220, 214, TFT_GOLD, "ROOM HUM"};
-constexpr TftDashboardField kRefrigTempField = {246, 86, 216, 76, 260, 100, 448, 126, TFT_GREENYELLOW, "REFRIG TEMP"};
-constexpr TftDashboardField kRefrigHumField = {246, 174, 216, 76, 260, 188, 448, 214, TFT_CYAN, "REFRIG HUM"};
-constexpr TftDashboardField kCurrentField = {18, 262, 216, 44, 32, 274, 220, 289, TFT_ORANGE, "CURRENT"};
-constexpr TftDashboardField kLastRuntimeField = {246, 262, 216, 44, 260, 274, 448, 289, TFT_MAGENTA, "LAST RUNTIME"};
+constexpr TftDashboardField kRoomTempField = {18, 86, 216, 64, 32, 96, 220, 128, TFT_YELLOW, "ROOM TEMP"};
+constexpr TftDashboardField kRoomHumField = {18, 160, 216, 64, 32, 170, 220, 202, TFT_GOLD, "ROOM HUM"};
+constexpr TftDashboardField kRefrigTempField = {246, 86, 216, 64, 260, 96, 448, 128, TFT_GREENYELLOW, "REFRIG TEMP"};
+constexpr TftDashboardField kRefrigHumField = {246, 160, 216, 64, 260, 170, 448, 202, TFT_CYAN, "REFRIG HUM"};
+constexpr TftDashboardField kCurrentField = {18, 234, 216, 64, 32, 244, 220, 276, TFT_ORANGE, "CURRENT"};
+constexpr TftDashboardField kLastRuntimeField = {246, 234, 216, 64, 260, 244, 448, 276, TFT_MAGENTA, "LAST RUNTIME"};
 
 void tftDashboardDrawPanel(const TftDashboardField &field)
 {
@@ -1376,7 +1378,7 @@ void tftDashboardStaticLayout()
   tft.setTextColor(TFT_WHITE, kTftHeaderFill);
   tft.drawString("LGS TS Cool", 28, 18, 4);
   tft.setTextColor(TFT_DARKGREY, kTftHeaderFill);
-  tft.drawString("CURRENT RUNTIME", 30, 50, 2);
+  tft.drawString("CURRENT RUNTIME", 30, kTftHeaderRuntimeLabelY, 2);
 
   tftDashboardDrawPanel(kRoomTempField);
   tftDashboardDrawPanel(kRoomHumField);
@@ -1405,17 +1407,28 @@ void formatRuntime(uint32_t seconds, char *buffer, size_t bufferSize)
   }
 }
 
+uint8_t tftChooseFontForWidth(const char *text, int16_t maxWidth, uint8_t preferredFont, uint8_t fallbackFont)
+{
+  if (tft.textWidth(text, preferredFont) <= maxWidth) {
+    return preferredFont;
+  }
+
+  return fallbackFont;
+}
+
 void tftDashboardDrawFieldValue(const TftDashboardField &field, const char *value, uint16_t color)
 {
   const int16_t clearX = field.x + 14;
-  const int16_t clearY = field.y + 26;
+  const int16_t clearY = field.labelY + 16;
   const int16_t clearW = field.w - 24;
-  const int16_t clearH = field.h - 32;
+  const int16_t clearH = (field.y + field.h - 10) - clearY;
+  const uint8_t valueFont = tftChooseFontForWidth(value, clearW, 4, 2);
+  const int16_t valueY = (valueFont == 4) ? field.valueY : static_cast<int16_t>(field.valueY - 2);
 
   tft.fillRect(clearX, clearY, clearW, clearH, kTftPanelFill);
   tft.setTextDatum(TR_DATUM);
   tft.setTextColor(color, kTftPanelFill);
-  tft.drawString(value, field.valueX, field.valueY, 4);
+  tft.drawString(value, field.valueX, valueY, valueFont);
 }
 
 // วาดค่าเฉพาะเมื่อข้อความเปลี่ยน (ลดทราฟิก SPI + กันกระพริบ)
@@ -1445,11 +1458,15 @@ void updateTftDashboard(const Sht40Reading &sht, const Sht40Reading &sht31,
 
   formatRuntime(runtimeSeconds, buffer, sizeof(buffer));
   if (strncmp(headerRuntimeCache, buffer, sizeof(headerRuntimeCache)) != 0) {
+    const int16_t headerRuntimeX = 438;
+    const int16_t headerRuntimeAreaX = 220;
+    const int16_t headerRuntimeAreaW = 220;
+    const uint8_t headerRuntimeFont = tftChooseFontForWidth(buffer, headerRuntimeAreaW, 4, 2);
     snprintf(headerRuntimeCache, sizeof(headerRuntimeCache), "%s", buffer);
-    tft.fillRect(250, 18, 190, 38, kTftHeaderFill);
+    tft.fillRect(headerRuntimeAreaX, 38, headerRuntimeAreaW, 18, kTftHeaderFill);
     tft.setTextDatum(TR_DATUM);
     tft.setTextColor(kTftHeaderValue, kTftHeaderFill);
-    tft.drawString(buffer, 434, 22, 4);
+    tft.drawString(buffer, headerRuntimeX, kTftHeaderRuntimeValueY, headerRuntimeFont);
   }
 
   if (isfinite(sht.temperatureC)) {
