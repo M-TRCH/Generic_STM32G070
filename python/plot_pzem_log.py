@@ -6,6 +6,11 @@ from typing import Any
 
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+DEFAULT_LOG_DIR = Path(__file__).resolve().parent / "log"
+LOG_PRESETS = {
+    "discharge": DEFAULT_LOG_DIR / "discharge_log.csv",
+    "charge": DEFAULT_LOG_DIR / "charge_log.csv",
+}
 GRAPH_1_SERIES = [
     ("voltage", "Voltage (V)", "tab:blue"),
     ("energy_wh", "Energy (Wh)", "tab:purple"),
@@ -26,9 +31,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "csv_path",
         nargs="?",
-        default=Path(__file__).resolve().parent / "log" / "discharge_log.csv",
         type=Path,
-        help="Path to the CSV file. Defaults to python/log/discharge_log.csv.",
+        help="Optional CSV file path. Overrides --log-type when provided.",
+    )
+    parser.add_argument(
+        "--log-type",
+        choices=tuple(LOG_PRESETS.keys()),
+        default="discharge",
+        help="Select a preset log file from python/log. Default is discharge.",
     )
     parser.add_argument(
         "--output",
@@ -57,34 +67,87 @@ def parse_float(value: str) -> float | None:
         return None
 
 
-def load_rows(csv_path: Path) -> list[dict[str, Any]]:
+def build_row(raw_row: dict[str, str]) -> dict[str, Any] | None:
+    pc_time = raw_row.get("pc_time", "").strip()
+    if not pc_time:
+        return None
+
+    voltage = parse_float(raw_row.get("voltage", ""))
+    energy_wh = parse_float(raw_row.get("energy_wh", ""))
+    soc_percent = parse_float(raw_row.get("soc_percent", ""))
+    remaining_ah = parse_float(raw_row.get("remaining_ah", ""))
+    if all(value is None for value in (voltage, energy_wh, soc_percent, remaining_ah)):
+        return None
+
+    try:
+        timestamp = datetime.strptime(pc_time, TIME_FORMAT)
+    except ValueError:
+        return None
+
+    return {
+        "pc_time": timestamp,
+        "voltage": voltage,
+        "energy_wh": energy_wh,
+        "soc_percent": soc_percent,
+        "remaining_ah": remaining_ah,
+    }
+
+
+def load_rows(csv_path: Path, log_type: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
 
     with csv_path.open("r", newline="", encoding="utf-8") as csv_file:
         reader = csv.DictReader(csv_file)
-        for raw_row in reader:
-            if raw_row.get("error", "").strip() == "read_failed":
-                break
+        if log_type == "charge":
+            collecting = False
 
-            pc_time = raw_row.get("pc_time", "").strip()
-            if not pc_time:
-                continue
+            for raw_row in reader:
+                if raw_row.get("error", "").strip() == "read_failed":
+                    rows = []
+                    collecting = True
+                    continue
 
-            try:
-                timestamp = datetime.strptime(pc_time, TIME_FORMAT)
-            except ValueError:
-                continue
+                if not collecting:
+                    continue
 
-            row: dict[str, Any] = {"pc_time": timestamp}
-            for key, _, _ in GRAPH_1_SERIES + GRAPH_2_SERIES:
-                row[key] = parse_float(raw_row.get(key, ""))
+                row = build_row(raw_row)
+                if row is None:
+                    continue
 
-            rows.append(row)
+                rows.append(row)
+
+                if row["soc_percent"] == 100.0:
+                    break
+        else:
+            collecting = False
+
+            for raw_row in reader:
+                if raw_row.get("error", "").strip() == "read_failed":
+                    if collecting:
+                        break
+                    continue
+
+                row = build_row(raw_row)
+                if row is None:
+                    continue
+
+                collecting = True
+                rows.append(row)
 
     if not rows:
-        raise ValueError("No plottable rows were found before the first read_failed entry.")
+        if log_type == "charge":
+            raise ValueError("No plottable rows were found from the latest read_failed entry to the first soc_percent=100.0 row.")
+
+        raise ValueError("No plottable rows were found between the first valid data row and the next read_failed entry.")
 
     return rows
+
+
+def resolve_csv_path(args: argparse.Namespace) -> Path:
+    if args.csv_path is not None:
+        return args.csv_path
+
+    return LOG_PRESETS[args.log_type]
 
 
 def mark_time_bounds(axis: Any, times: list[datetime]) -> None:
@@ -149,16 +212,23 @@ def create_multi_axis_plot(axis: Any, times: list[datetime], rows: list[dict[str
 
 def main() -> int:
     args = build_parser().parse_args()
+    csv_path = resolve_csv_path(args)
 
-    if args.output or args.no_show:
-        import matplotlib
+    try:
+        if args.output or args.no_show:
+            import matplotlib
 
-        matplotlib.use("Agg")
+            matplotlib.use("Agg")
 
-    import matplotlib.dates as mdates
-    import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise SystemExit(
+            "matplotlib is required. Install it with: "
+            "C:\\Users\\mteer\\.platformio\\penv\\Scripts\\python.exe -m pip install matplotlib"
+        ) from exc
 
-    rows = load_rows(args.csv_path)
+    rows = load_rows(csv_path, args.log_type)
     times = [row["pc_time"] for row in rows]
 
     figure, axes = plt.subplots(2, 1, figsize=(15, 10), sharex=True)
@@ -182,10 +252,12 @@ def main() -> int:
     axes[1].set_xlabel("Time")
     axes[1].xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
     figure.autofmt_xdate()
-    figure.suptitle(
-        f"{args.csv_path.name} ({len(rows)} rows before first read_failed)",
-        fontsize=14,
-    )
+    if args.log_type == "charge":
+        subtitle = f"{csv_path.name} ({len(rows)} rows from latest read_failed to first soc_percent=100.0)"
+    else:
+        subtitle = f"{csv_path.name} ({len(rows)} rows from first valid data to next read_failed)"
+
+    figure.suptitle(subtitle, fontsize=14)
 
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
