@@ -87,14 +87,13 @@ constexpr uint8_t kRuntimeRecordSize = 12;       // marker(4) + seconds(4) + ~se
 constexpr uint32_t kSecondsPerMinute = 60u;
 constexpr uint32_t kSecondsPerHour = 60u * kSecondsPerMinute;
 constexpr uint32_t kSecondsPerDay = 24u * kSecondsPerHour;
-// runtime จริงเดินช้ากว่าเวลาจริงบนบอร์ดนี้ประมาณ 45s ต่อ 60s จึงชดเชยด้วย 4/3
-constexpr uint32_t kRuntimeTimeScaleNumerator = 4u;
-constexpr uint32_t kRuntimeTimeScaleDenominator = 3u;
+// runtime ใช้ RTC เป็นฐานเวลา (อิสระจาก SysTick) เพราะ NeoPixel.show() ปิด
+// interrupt นานต่อเฟรมทำให้ millis() เดินช้า → runtime คลาดเคลื่อน
 constexpr bool kRuntimeUseTestSavePeriod = false;
 constexpr uint32_t kRuntimeSaveIntervalTestSec = 10u;   // ใช้ทดสอบ: บันทึกทุก 10 วินาที
-constexpr uint32_t kRuntimeSaveIntervalNormalDays = 1u;
+constexpr uint32_t kRuntimeSaveIntervalNormalDays = 0u;
 constexpr uint32_t kRuntimeSaveIntervalNormalHours = 0u;
-constexpr uint32_t kRuntimeSaveIntervalNormalMinutes = 0u;
+constexpr uint32_t kRuntimeSaveIntervalNormalMinutes = 10u;
 constexpr uint32_t kRuntimeSaveIntervalNormalSec =
   (kRuntimeSaveIntervalNormalDays * kSecondsPerDay)
   + (kRuntimeSaveIntervalNormalHours * kSecondsPerHour)
@@ -147,6 +146,7 @@ struct Ina180Reading
 // RTC (internal RTC of STM32G070CBT6, clocked from LSI ~32 kHz)
 // ---------------------------------------------------------------------------
 void printRtcReading(const RTC_TimeTypeDef &time, const RTC_DateTypeDef &date);
+bool readRtc(RTC_TimeTypeDef &time, RTC_DateTypeDef &date);
 
 RTC_HandleTypeDef rtcHandle = {};
 
@@ -405,31 +405,62 @@ bool saveRuntimeSeconds(uint32_t seconds)
   return eepromWriteBytes(kAt24c32RuntimeAddr, buffer, sizeof(buffer));
 }
 
-// นับเวลาใช้งานสะสมจาก millis() และเขียนลง EEPROM ทุก kRuntimeSaveIntervalSec
+// แปลงเวลา RTC ปัจจุบันเป็นจำนวนวินาทีสะสม (epoch ภายใน) เพื่อใช้วัด delta
+// ใช้สูตร days-from-civil (ปี 2000-2099 เป็นบวกเสมอ จึงไม่ต้องจัดการค่าติดลบ)
+uint64_t rtcEpochSeconds()
+{
+  RTC_TimeTypeDef time = {};
+  RTC_DateTypeDef date = {};
+  if (!readRtc(time, date)) {
+    return 0; // sentinel: RTC ยังอ่านไม่ได้
+  }
+
+  const uint16_t year = static_cast<uint16_t>(2000 + date.Year);
+  const uint8_t month = date.Month;
+  const uint8_t day = date.Date;
+
+  const uint16_t y = static_cast<uint16_t>(year - (month <= 2 ? 1 : 0));
+  const uint32_t era = y / 400u;
+  const uint32_t yoe = y - era * 400u;
+  const uint32_t doy = (153u * (month > 2 ? (month - 3u) : (month + 9u)) + 2u) / 5u + day - 1u;
+  const uint32_t doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+  const uint64_t days = static_cast<uint64_t>(era) * 146097u + doe;
+
+  return days * 86400ull
+         + static_cast<uint32_t>(time.Hours) * 3600u
+         + static_cast<uint32_t>(time.Minutes) * 60u
+         + static_cast<uint32_t>(time.Seconds);
+}
+
+// นับเวลาใช้งานสะสมจาก RTC (ไม่ใช้ millis เพราะ NeoPixel.show ปิด interrupt
+// ทำให้ SysTick หาย → millis เดินช้า) แล้วเขียนลง EEPROM ทุก kRuntimeSaveIntervalSec
 void serviceRuntimeCounter()
 {
   static bool initialized = false;
-  static uint32_t lastTickMs = 0;
-  static uint64_t carryScaledMs = 0;
+  static uint64_t lastEpoch = 0;
   static uint32_t lastSavedSeconds = 0;
 
-  const uint32_t nowMs = millis();
+  const uint64_t nowEpoch = rtcEpochSeconds();
+  if (nowEpoch == 0) {
+    return; // RTC ยังไม่พร้อม ข้ามรอบนี้ไปก่อน
+  }
 
   if (!initialized) {
-    lastTickMs = nowMs;
+    lastEpoch = nowEpoch;
     lastSavedSeconds = lastRuntimeSeconds;
     initialized = true;
     return;
   }
 
-  const uint32_t deltaMs = nowMs - lastTickMs; // unsigned subtraction รองรับ millis overflow
-  carryScaledMs += static_cast<uint64_t>(deltaMs) * kRuntimeTimeScaleNumerator;
-  lastTickMs = nowMs;
-
-  const uint64_t scaledMsPerSecond = 1000ULL * kRuntimeTimeScaleDenominator;
-  if (carryScaledMs >= scaledMsPerSecond) {
-    deviceRuntimeSeconds += static_cast<uint32_t>(carryScaledMs / scaledMsPerSecond);
-    carryScaledMs %= scaledMsPerSecond;
+  if (nowEpoch > lastEpoch) {
+    const uint64_t delta = nowEpoch - lastEpoch;
+    // กันค่ากระโดดผิดปกติ (เช่น RTC ถูกตั้งเวลาใหม่) ไม่ให้บวกทีละมาก ๆ
+    if (delta < 86400ull * 3650ull) {
+      deviceRuntimeSeconds += static_cast<uint32_t>(delta);
+    }
+    lastEpoch = nowEpoch;
+  } else if (nowEpoch < lastEpoch) {
+    lastEpoch = nowEpoch; // RTC เดินถอยหลัง (ถูกตั้งใหม่) → sync เฉย ๆ ไม่นับ
   }
 
   if (deviceRuntimeSeconds - lastSavedSeconds >= kRuntimeSaveIntervalSec) {
