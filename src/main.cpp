@@ -75,6 +75,10 @@ constexpr uint32_t kRainbowFrameIntervalMs = 20;
 constexpr uint8_t kSht40Address = 0x44;
 constexpr uint8_t kSht40MeasureHighPrecision = 0xFD;
 
+// SHT31 อยู่บนบัส Wire (PA12/PB13 ช่องเดียวกับ OLED เดิม)
+constexpr uint8_t kSht31Address = 0x44;
+constexpr uint16_t kSht31MeasureHighRepeatability = 0x2400;
+
 // Set to a valid GPIO pin if your RS485 transceiver needs DE/RE control.
 constexpr int8_t kRs485DirectionPin = -1;
 
@@ -234,6 +238,57 @@ bool readSht40(Sht40Reading &reading)
 void printSht40Reading(const Sht40Reading &reading)
 {
   Serial.print(F("SHT40 T="));
+  Serial.print(reading.temperatureC, 2);
+  Serial.print(F("C RH="));
+  Serial.print(reading.humidityPercent, 2);
+  Serial.println(F("%"));
+}
+
+// อ่าน SHT31 บนบัส Wire (ช่องเดียวกับ OLED) ใช้โครงสร้างค่าเดียวกับ SHT40
+bool readSht31(Sht40Reading &reading)
+{
+  Wire.beginTransmission(kSht31Address);
+  Wire.write(static_cast<uint8_t>(kSht31MeasureHighRepeatability >> 8));
+  Wire.write(static_cast<uint8_t>(kSht31MeasureHighRepeatability & 0xFF));
+  if (Wire.endTransmission() != 0) {
+    return false;
+  }
+
+  delay(20); // high repeatability ใช้เวลาวัดสูงสุด ~15ms
+
+  constexpr uint8_t kResponseSize = 6;
+  uint8_t response[kResponseSize] = {};
+  if (Wire.requestFrom(static_cast<int>(kSht31Address), static_cast<int>(kResponseSize)) != kResponseSize) {
+    return false;
+  }
+
+  for (uint8_t i = 0; i < kResponseSize; ++i) {
+    if (!Wire.available()) {
+      return false;
+    }
+    response[i] = static_cast<uint8_t>(Wire.read());
+  }
+
+  if (crc8Sensirion(response, 2) != response[2]) {
+    return false;
+  }
+
+  if (crc8Sensirion(response + 3, 2) != response[5]) {
+    return false;
+  }
+
+  uint16_t rawTemperature = static_cast<uint16_t>(response[0] << 8) | response[1];
+  uint16_t rawHumidity = static_cast<uint16_t>(response[3] << 8) | response[4];
+
+  reading.temperatureC = -45.0f + (175.0f * static_cast<float>(rawTemperature) / 65535.0f);
+  reading.humidityPercent = 100.0f * static_cast<float>(rawHumidity) / 65535.0f;
+  reading.humidityPercent = constrain(reading.humidityPercent, 0.0f, 100.0f);
+  return true;
+}
+
+void printSht31Reading(const Sht40Reading &reading)
+{
+  Serial.print(F("SHT31 T="));
   Serial.print(reading.temperatureC, 2);
   Serial.print(F("C RH="));
   Serial.print(reading.humidityPercent, 2);
@@ -1126,8 +1181,10 @@ void runTftTest()
 // (อ้างอิงโหมด RAINBOW_ANIMATION) มาแสดงบนจอ TFT 3.5" แทนจอ OLED เดิม
 // ---------------------------------------------------------------------------
 constexpr int16_t kTftRowTempY = 70;
-constexpr int16_t kTftRowHumY = 140;
-constexpr int16_t kTftRowCurrentY = 210;
+constexpr int16_t kTftRowHumY = 110;
+constexpr int16_t kTftRowTemp31Y = 150;
+constexpr int16_t kTftRowHum31Y = 190;
+constexpr int16_t kTftRowCurrentY = 240;
 constexpr int16_t kTftValueX = 470;
 
 void tftDashboardStaticLayout()
@@ -1137,8 +1194,10 @@ void tftDashboardStaticLayout()
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString("Temp", 10, kTftRowTempY, 4);
-  tft.drawString("Humidity", 10, kTftRowHumY, 4);
+  tft.drawString("Temp 40", 10, kTftRowTempY, 4);
+  tft.drawString("Hum 40", 10, kTftRowHumY, 4);
+  tft.drawString("Temp 31", 10, kTftRowTemp31Y, 4);
+  tft.drawString("Hum 31", 10, kTftRowHum31Y, 4);
   tft.drawString("Current", 10, kTftRowCurrentY, 4);
 }
 
@@ -1162,7 +1221,7 @@ void tftDashboardDrawValueIfChanged(int16_t y, const char *value, uint16_t color
   tftDashboardDrawValue(y, value, color);
 }
 
-void updateTftDashboard(const Sht40Reading &sht, const Ina180Reading &ina,
+void updateTftDashboard(const Sht40Reading &sht, const Sht40Reading &sht31, const Ina180Reading &ina,
                         const RTC_TimeTypeDef &time, const RTC_DateTypeDef &date, bool rtcOk)
 {
   char buffer[24] = {};
@@ -1170,6 +1229,8 @@ void updateTftDashboard(const Sht40Reading &sht, const Ina180Reading &ina,
   static char dateCache[16] = {};
   static char tempCache[16] = {};
   static char humCache[16] = {};
+  static char temp31Cache[16] = {};
+  static char hum31Cache[16] = {};
   static char currentCache[16] = {};
 
   // แถบบน: เวลา (ใหญ่) วาดเฉพาะเมื่อเปลี่ยน
@@ -1223,6 +1284,26 @@ void updateTftDashboard(const Sht40Reading &sht, const Ina180Reading &ina,
     snprintf(buffer, sizeof(buffer), "-- %%");
   }
   tftDashboardDrawValueIfChanged(kTftRowHumY, buffer, TFT_YELLOW, humCache, sizeof(humCache));
+
+  // อุณหภูมิ SHT31 (บัส Wire)
+  if (isfinite(sht31.temperatureC)) {
+    char value[12] = {};
+    dtostrf(sht31.temperatureC, 0, 2, value);
+    snprintf(buffer, sizeof(buffer), "%s C", value);
+  } else {
+    snprintf(buffer, sizeof(buffer), "-- C");
+  }
+  tftDashboardDrawValueIfChanged(kTftRowTemp31Y, buffer, TFT_GREENYELLOW, temp31Cache, sizeof(temp31Cache));
+
+  // ความชื้น SHT31 (บัส Wire)
+  if (isfinite(sht31.humidityPercent)) {
+    char value[12] = {};
+    dtostrf(sht31.humidityPercent, 0, 2, value);
+    snprintf(buffer, sizeof(buffer), "%s %%", value);
+  } else {
+    snprintf(buffer, sizeof(buffer), "-- %%");
+  }
+  tftDashboardDrawValueIfChanged(kTftRowHum31Y, buffer, TFT_GREENYELLOW, hum31Cache, sizeof(hum31Cache));
 
   // กระแส INA180
   if (isfinite(ina.currentAmps)) {
@@ -1325,8 +1406,11 @@ void setup()
 #endif
 
 #if ENABLE_TFT_DASHBOARD
-  // เซ็นเซอร์: SHT40 (Wire1), INA180 (analog), RTC ภายใน
+  // เซ็นเซอร์: SHT40 (Wire1), SHT31 (Wire ช่องเดียวกับ OLED), INA180 (analog), RTC ภายใน
   Wire1.begin();
+  Wire.setSDA(PA12);
+  Wire.setSCL(PB13);
+  Wire.begin();
   analogReadResolution(12);
   pinMode(kIna180AnalogPin, INPUT_ANALOG);
   calibrateIna180ZeroOffset();
@@ -1421,7 +1505,8 @@ void loop()
 
     static uint32_t lastFastMs = 0;
     static uint32_t lastSlowMs = 0;
-    static Sht40Reading sht;   // เก็บค่าล่าสุดไว้แสดงระหว่างรอบช้า
+    static Sht40Reading sht;     // SHT40 (Wire1) เก็บค่าล่าสุดไว้แสดงระหว่างรอบช้า
+    static Sht40Reading sht31;   // SHT31 (Wire) เก็บค่าล่าสุดไว้แสดงระหว่างรอบช้า
 
     const uint32_t nowMs = millis();
 
@@ -1433,6 +1518,14 @@ void loop()
         sht.temperatureC = NAN;
         sht.humidityPercent = NAN;
         Serial.println(F("SHT40 read failed"));
+      }
+
+      if (readSht31(sht31)) {
+        printSht31Reading(sht31);
+      } else {
+        sht31.temperatureC = NAN;
+        sht31.humidityPercent = NAN;
+        Serial.println(F("SHT31 read failed"));
       }
     }
 
@@ -1446,7 +1539,7 @@ void loop()
       Ina180Reading ina;
       readIna180(ina);
 
-      updateTftDashboard(sht, ina, time, date, rtcOk);
+      updateTftDashboard(sht, sht31, ina, time, date, rtcOk);
     }
   }
   showRainbowAnimation();
