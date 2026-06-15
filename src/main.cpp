@@ -87,7 +87,10 @@ constexpr uint8_t kRuntimeRecordSize = 12;       // marker(4) + seconds(4) + ~se
 constexpr uint32_t kSecondsPerMinute = 60u;
 constexpr uint32_t kSecondsPerHour = 60u * kSecondsPerMinute;
 constexpr uint32_t kSecondsPerDay = 24u * kSecondsPerHour;
-constexpr bool kRuntimeUseTestSavePeriod = true;
+// runtime จริงเดินช้ากว่าเวลาจริงบนบอร์ดนี้ประมาณ 45s ต่อ 60s จึงชดเชยด้วย 4/3
+constexpr uint32_t kRuntimeTimeScaleNumerator = 4u;
+constexpr uint32_t kRuntimeTimeScaleDenominator = 3u;
+constexpr bool kRuntimeUseTestSavePeriod = false;
 constexpr uint32_t kRuntimeSaveIntervalTestSec = 10u;   // ใช้ทดสอบ: บันทึกทุก 10 วินาที
 constexpr uint32_t kRuntimeSaveIntervalNormalDays = 1u;
 constexpr uint32_t kRuntimeSaveIntervalNormalHours = 0u;
@@ -407,7 +410,7 @@ void serviceRuntimeCounter()
 {
   static bool initialized = false;
   static uint32_t lastTickMs = 0;
-  static uint32_t carryMs = 0;
+  static uint64_t carryScaledMs = 0;
   static uint32_t lastSavedSeconds = 0;
 
   const uint32_t nowMs = millis();
@@ -419,12 +422,14 @@ void serviceRuntimeCounter()
     return;
   }
 
-  carryMs += (nowMs - lastTickMs); // unsigned subtraction รองรับ millis overflow
+  const uint32_t deltaMs = nowMs - lastTickMs; // unsigned subtraction รองรับ millis overflow
+  carryScaledMs += static_cast<uint64_t>(deltaMs) * kRuntimeTimeScaleNumerator;
   lastTickMs = nowMs;
 
-  if (carryMs >= 1000U) {
-    deviceRuntimeSeconds += carryMs / 1000U;
-    carryMs %= 1000U;
+  const uint64_t scaledMsPerSecond = 1000ULL * kRuntimeTimeScaleDenominator;
+  if (carryScaledMs >= scaledMsPerSecond) {
+    deviceRuntimeSeconds += static_cast<uint32_t>(carryScaledMs / scaledMsPerSecond);
+    carryScaledMs %= scaledMsPerSecond;
   }
 
   if (deviceRuntimeSeconds - lastSavedSeconds >= kRuntimeSaveIntervalSec) {
@@ -1418,17 +1423,24 @@ uint8_t tftChooseFontForWidth(const char *text, int16_t maxWidth, uint8_t prefer
 
 void tftDashboardDrawFieldValue(const TftDashboardField &field, const char *value, uint16_t color)
 {
-  const int16_t clearX = field.x + 14;
-  const int16_t clearY = field.labelY + 16;
-  const int16_t clearW = field.w - 24;
-  const int16_t clearH = (field.y + field.h - 10) - clearY;
+  const int16_t clearX = field.x + 7;
+  const int16_t clearY = field.y + 2;
+  const int16_t clearW = field.w - 10;
+  const int16_t clearH = field.h - 4;
+  const int16_t valueMaxWidth = field.w - 26;
   const uint8_t valueFont = tftChooseFontForWidth(value, clearW, 4, 2);
   const int16_t valueY = (valueFont == 4) ? field.valueY : static_cast<int16_t>(field.valueY - 2);
 
   tft.fillRect(clearX, clearY, clearW, clearH, kTftPanelFill);
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_LIGHTGREY, kTftPanelFill);
+  tft.drawString(field.label, field.labelX, field.labelY, 2);
+
   tft.setTextDatum(TR_DATUM);
   tft.setTextColor(color, kTftPanelFill);
-  tft.drawString(value, field.valueX, valueY, valueFont);
+  tft.drawString(value, field.valueX, valueY,
+                 tftChooseFontForWidth(value, valueMaxWidth, 4, 2));
 }
 
 // วาดค่าเฉพาะเมื่อข้อความเปลี่ยน (ลดทราฟิก SPI + กันกระพริบ)
