@@ -39,9 +39,10 @@ constexpr uint8_t kDisplayI2cAddress =
 #define ENABLE_RAINBOW_ANIMATION    0
 #define ENABLE_PYTHON_JSON_OUTPUT   0
 #define ENABLE_LATCH_CONTROL_TEST   0
-#define ENABLE_TFT_ILI9488_TEST     1
+#define ENABLE_TFT_ILI9488_TEST     0
+#define ENABLE_TFT_DASHBOARD        1 
 
-#if ENABLE_TFT_ILI9488_TEST
+#if ENABLE_TFT_ILI9488_TEST || ENABLE_TFT_DASHBOARD
 #include <TFT_eSPI.h>
 #endif
 
@@ -996,9 +997,9 @@ void latchControlTest()
   }
 }
 
-#if ENABLE_TFT_ILI9488_TEST
+#if ENABLE_TFT_ILI9488_TEST || ENABLE_TFT_DASHBOARD
 // ---------------------------------------------------------------------------
-// ทดสอบจอ TFT 3.5" ILI9488 + ทัช XPT2046 (บัส SPI1 ร่วมกัน)
+// จอ TFT 3.5" ILI9488 + ทัช XPT2046 (บัส SPI1 ร่วมกัน)
 // กำหนดขา/ไดรเวอร์ทั้งหมดผ่าน build_flags ใน platformio.ini
 //
 //   TFT_SCK / T_CLK  PA5   |  TFT_MOSI / T_DIN PB5  |  T_DO (MISO) PB4
@@ -1009,6 +1010,22 @@ TFT_eSPI tft = TFT_eSPI();
 
 constexpr uint8_t kTftBacklightPin = PB0;
 
+// ตั้งค่าฮาร์ดแวร์ SPI + backlight + init จอ (ใช้ร่วมทั้งโหมดทดสอบและ dashboard)
+void initTftHardware()
+{
+  SPI.setSCLK(PA5);
+  SPI.setMOSI(PB5);
+  SPI.setMISO(PB4);
+
+  pinMode(kTftBacklightPin, OUTPUT);
+  digitalWrite(kTftBacklightPin, HIGH);
+
+  tft.init();
+  tft.setRotation(1); // แนวนอน (480 x 320)
+}
+#endif
+
+#if ENABLE_TFT_ILI9488_TEST
 // ค่าคาลิเบรตทัช (ค่าเริ่มต้นแบบประมาณการ ปรับได้จากผล touch_calibrate)
 // ลำดับ: { xMin, xMax, yMin, yMax, rotation }
 uint16_t tftTouchCalData[5] = { 300, 3600, 300, 3600, 2 };
@@ -1064,15 +1081,7 @@ void tftRunStartupSequence()
 
 void initTftTest()
 {
-  SPI.setSCLK(PA5);
-  SPI.setMOSI(PB5);
-  SPI.setMISO(PB4);
-
-  pinMode(kTftBacklightPin, OUTPUT);
-  digitalWrite(kTftBacklightPin, HIGH);
-
-  tft.init();
-  tft.setRotation(1); // แนวนอน (480 x 320)
+  initTftHardware();
   tft.setTouch(tftTouchCalData);
 
   Serial.print(F("Display size: "));
@@ -1110,6 +1119,122 @@ void runTftTest()
   }
 }
 #endif // ENABLE_TFT_ILI9488_TEST
+
+#if ENABLE_TFT_DASHBOARD
+// ---------------------------------------------------------------------------
+// โหมด Dashboard: รวมค่า RTC + SHT40 (อ้างอิงโหมด SHT40_TEST) และกระแส INA180
+// (อ้างอิงโหมด RAINBOW_ANIMATION) มาแสดงบนจอ TFT 3.5" แทนจอ OLED เดิม
+// ---------------------------------------------------------------------------
+constexpr int16_t kTftRowTempY = 70;
+constexpr int16_t kTftRowHumY = 140;
+constexpr int16_t kTftRowCurrentY = 210;
+constexpr int16_t kTftValueX = 470;
+
+void tftDashboardStaticLayout()
+{
+  tft.fillScreen(TFT_BLACK);
+  tft.drawFastHLine(0, 56, tft.width(), TFT_DARKGREY);
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("Temp", 10, kTftRowTempY, 4);
+  tft.drawString("Humidity", 10, kTftRowHumY, 4);
+  tft.drawString("Current", 10, kTftRowCurrentY, 4);
+}
+
+void tftDashboardDrawValue(int16_t y, const char *value, uint16_t color)
+{
+  // ล้างพื้นที่ค่าก่อน (กันเลขเก่าค้าง) แล้ววาดชิดขวา
+  tft.fillRect(200, y - 4, tft.width() - 200, 36, TFT_BLACK);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.drawString(value, kTftValueX, y, 4);
+}
+
+// วาดค่าเฉพาะเมื่อข้อความเปลี่ยน (ลดทราฟิก SPI + กันกระพริบ)
+void tftDashboardDrawValueIfChanged(int16_t y, const char *value, uint16_t color,
+                                    char *cache, size_t cacheSize)
+{
+  if (strncmp(cache, value, cacheSize) == 0) {
+    return;
+  }
+  snprintf(cache, cacheSize, "%s", value);
+  tftDashboardDrawValue(y, value, color);
+}
+
+void updateTftDashboard(const Sht40Reading &sht, const Ina180Reading &ina,
+                        const RTC_TimeTypeDef &time, const RTC_DateTypeDef &date, bool rtcOk)
+{
+  char buffer[24] = {};
+  static char timeCache[16] = {};
+  static char dateCache[16] = {};
+  static char tempCache[16] = {};
+  static char humCache[16] = {};
+  static char currentCache[16] = {};
+
+  // แถบบน: เวลา (ใหญ่) วาดเฉพาะเมื่อเปลี่ยน
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  if (rtcOk) {
+    snprintf(buffer, sizeof(buffer), "%02u:%02u:%02u",
+             static_cast<unsigned>(time.Hours), static_cast<unsigned>(time.Minutes),
+             static_cast<unsigned>(time.Seconds));
+  } else {
+    snprintf(buffer, sizeof(buffer), "--:--:--");
+  }
+  if (strncmp(timeCache, buffer, sizeof(timeCache)) != 0) {
+    snprintf(timeCache, sizeof(timeCache), "%s", buffer);
+    tft.fillRect(0, 0, 320, 54, TFT_BLACK);
+    tft.drawString(buffer, 10, 6, 6);
+  }
+
+  // วันที่ (ขวา) วาดเฉพาะเมื่อเปลี่ยน
+  if (rtcOk) {
+    snprintf(buffer, sizeof(buffer), "%02u/%02u/20%02u",
+             static_cast<unsigned>(date.Date), static_cast<unsigned>(date.Month),
+             static_cast<unsigned>(date.Year));
+  } else {
+    snprintf(buffer, sizeof(buffer), "--/--/----");
+  }
+  if (strncmp(dateCache, buffer, sizeof(dateCache)) != 0) {
+    snprintf(dateCache, sizeof(dateCache), "%s", buffer);
+    tft.fillRect(330, 0, tft.width() - 330, 54, TFT_BLACK);
+    tft.setTextDatum(TR_DATUM);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString(buffer, kTftValueX, 20, 4);
+  }
+
+  // อุณหภูมิ
+  if (isfinite(sht.temperatureC)) {
+    char value[12] = {};
+    dtostrf(sht.temperatureC, 0, 2, value);
+    snprintf(buffer, sizeof(buffer), "%s C", value);
+  } else {
+    snprintf(buffer, sizeof(buffer), "-- C");
+  }
+  tftDashboardDrawValueIfChanged(kTftRowTempY, buffer, TFT_YELLOW, tempCache, sizeof(tempCache));
+
+  // ความชื้น
+  if (isfinite(sht.humidityPercent)) {
+    char value[12] = {};
+    dtostrf(sht.humidityPercent, 0, 2, value);
+    snprintf(buffer, sizeof(buffer), "%s %%", value);
+  } else {
+    snprintf(buffer, sizeof(buffer), "-- %%");
+  }
+  tftDashboardDrawValueIfChanged(kTftRowHumY, buffer, TFT_YELLOW, humCache, sizeof(humCache));
+
+  // กระแส INA180
+  if (isfinite(ina.currentAmps)) {
+    char value[12] = {};
+    dtostrf(ina.currentAmps, 0, 3, value);
+    snprintf(buffer, sizeof(buffer), "%s A", value);
+  } else {
+    snprintf(buffer, sizeof(buffer), "-- A");
+  }
+  tftDashboardDrawValueIfChanged(kTftRowCurrentY, buffer, TFT_ORANGE, currentCache, sizeof(currentCache));
+}
+#endif // ENABLE_TFT_DASHBOARD
 
 void setup()
 {
@@ -1198,6 +1323,25 @@ void setup()
 #if ENABLE_TFT_ILI9488_TEST
   initTftTest();
 #endif
+
+#if ENABLE_TFT_DASHBOARD
+  // เซ็นเซอร์: SHT40 (Wire1), INA180 (analog), RTC ภายใน
+  Wire1.begin();
+  analogReadResolution(12);
+  pinMode(kIna180AnalogPin, INPUT_ANALOG);
+  calibrateIna180ZeroOffset();
+
+  if (initRtc()) {
+    rtcBootCount = incrementRtcBootCount();
+    Serial.print(F("RTC boot count: "));
+    Serial.println(rtcBootCount);
+  } else {
+    Serial.println(F("RTC init failed"));
+  }
+
+  initTftHardware();
+  tftDashboardStaticLayout();
+#endif
 }
 
 void loop()
@@ -1268,6 +1412,44 @@ void loop()
   latchControlTest();
 #elif ENABLE_TFT_ILI9488_TEST
   runTftTest();
+#elif ENABLE_TFT_DASHBOARD
+  {
+    // จังหวะเร็ว: นาฬิกา + กระแส (รีเฟรชจอถี่)
+    constexpr uint32_t kFastIntervalMs = 150U;
+    // จังหวะช้า: SHT40 (มี delay ภายใน) อ่านทุก 1 วินาที
+    constexpr uint32_t kSlowIntervalMs = 1000U;
+
+    static uint32_t lastFastMs = 0;
+    static uint32_t lastSlowMs = 0;
+    static Sht40Reading sht;   // เก็บค่าล่าสุดไว้แสดงระหว่างรอบช้า
+
+    const uint32_t nowMs = millis();
+
+    if (nowMs - lastSlowMs >= kSlowIntervalMs) {
+      lastSlowMs = nowMs;
+      if (readSht40(sht)) {
+        printSht40Reading(sht);
+      } else {
+        sht.temperatureC = NAN;
+        sht.humidityPercent = NAN;
+        Serial.println(F("SHT40 read failed"));
+      }
+    }
+
+    if (nowMs - lastFastMs >= kFastIntervalMs) {
+      lastFastMs = nowMs;
+
+      RTC_TimeTypeDef time = {};
+      RTC_DateTypeDef date = {};
+      bool rtcOk = readRtc(time, date);
+
+      Ina180Reading ina;
+      readIna180(ina);
+
+      updateTftDashboard(sht, ina, time, date, rtcOk);
+    }
+  }
+  showRainbowAnimation();
 #else
   delay(1000);
 #endif
