@@ -54,6 +54,15 @@ void drawCenteredText(int16_t y, const char *text)
   display.print(text);
 }
 
+void printFloatOrNa(float value, uint8_t decimals)
+{
+  if (isfinite(value)) {
+    display.print(value, decimals);
+  } else {
+    display.print(F("N/A"));
+  }
+}
+
 } // namespace
 
 void initOledDisplay()
@@ -85,29 +94,32 @@ void showOledMessage(const __FlashStringHelper *line1, const __FlashStringHelper
   display.sendBuffer();
 }
 
-void updateOledDisplay(const Pzem017Reading &reading, float socPercent, float remainingCapacityAh)
+void updateOledDisplay(const Pzem017Reading &chargeReading, const Pzem017Reading &dischargeReading,
+                       float socPercent, float remainingCapacityAh)
 {
   display.clearBuffer();
   display.setFont(kOledCompactFont);
   display.setCursor(0, oledLineY(0));
-  display.print(F("V: "));
-  display.print(reading.voltage, 2);
-  display.print(F(" V"));
+  display.print(F("CH V:"));
+  printFloatOrNa(chargeReading.voltage, 2);
+  display.print(F(" I:"));
+  printFloatOrNa(chargeReading.current, 2);
 
   display.setCursor(0, oledLineY(1));
-  display.print(F("I: "));
-  display.print(reading.current, 2);
-  display.print(F(" A"));
-
-  display.setCursor(0, oledLineY(2));
-  display.print(F("P: "));
-  display.print(reading.power, 1);
+  display.print(F("CH P:"));
+  printFloatOrNa(chargeReading.power, 1);
   display.print(F(" W"));
 
+  display.setCursor(0, oledLineY(2));
+  display.print(F("DS V:"));
+  printFloatOrNa(dischargeReading.voltage, 2);
+  display.print(F(" I:"));
+  printFloatOrNa(dischargeReading.current, 2);
+
   display.setCursor(0, oledLineY(3));
-  display.print(F("E: "));
-  display.print(reading.energy, 0);
-  display.print(F(" Wh"));
+  display.print(F("DS P:"));
+  printFloatOrNa(dischargeReading.power, 1);
+  display.print(F(" W"));
 
   display.setCursor(0, oledLineY(4));
   display.print(F("SoC: "));

@@ -56,8 +56,14 @@ void calibrateIna180ZeroOffset();
 bool readIna180(Ina180Reading &reading);
 void printIna180Reading(const Ina180Reading &reading);
 
-// ---- PZEM-017 (RS485 / Modbus-RTU) ----
+// ---- PZEM-017 / PZEM-003 (RS485 / Modbus-RTU, โปรโตคอลเดียวกัน) ----
 void initPzem017();
+bool readPzem017AtAddress(uint8_t address, Pzem017Reading &reading);
 bool readPzem017(Pzem017Reading &reading);
 void printPzem017Reading(const Pzem017Reading &reading, float socPercent, float remainingCapacityAh);
 void printPzem017ReadError();
+
+// แก้ไข/อ่าน ID (Modbus slave address) ของ PZEM-003/017
+// ใช้ general address 0xF8 จึงทำงานได้แม้ไม่ทราบ ID เดิม (ต้องมีอุปกรณ์ตัวเดียวบนบัส)
+bool setPzem017Address(uint8_t newAddress);
+bool readPzem017Address(uint8_t &outAddress);

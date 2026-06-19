@@ -60,21 +60,26 @@ float lookupSocFromOcv(float voltage)
 
 } // namespace
 
+float updateSocState(float voltageV, float currentA);
+
 float updateSocState(const Pzem017Reading &reading)
+{
+  return updateSocState(reading.voltage, reading.current);
+}
+
+float updateSocState(float voltageV, float currentA)
 {
   static float socPercent = NAN;
   static uint32_t lastMs = 0;
 
   const uint32_t nowMs = millis();
-  const float voltageV = reading.voltage;
-  const float currentA = reading.current;
 
   if (!isfinite(voltageV) || !isfinite(currentA)) {
     return socPercent;
   }
 
   // Anchor: ชาร์จเต็ม → reset เป็น 100%
-  if (voltageV >= kSocChargeMaxVoltage && currentA < kSocChargeCompleteA) {
+  if (voltageV >= kSocChargeMaxVoltage && fabsf(currentA) < kSocChargeCompleteA) {
     socPercent = 100.0f;
     lastMs = nowMs;
     return socPercent;
@@ -95,7 +100,7 @@ float updateSocState(const Pzem017Reading &reading)
   }
 
   // แบตพัก (กระแสต่ำมาก) → ค่อยๆ drift เข้าหา OCV
-  if (currentA < kSocRestingThresholdA) {
+  if (fabsf(currentA) < kSocRestingThresholdA) {
     float ocvSoc = lookupSocFromOcv(voltageV);
     if (isfinite(ocvSoc)) {
       socPercent = socPercent * 0.98f + ocvSoc * 0.02f;

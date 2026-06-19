@@ -26,11 +26,16 @@ constexpr float kIna180Gain = 50.0f;
 constexpr float kIna180ShuntResistanceOhms = 0.010f;
 constexpr float kIna180NoiseFloorAmps = 0.02f;
 
-// ---- PZEM-017 ----
-constexpr uint8_t kPzem017Address = 0x01;
+// ---- PZEM-017 / PZEM-003 (โปรโตคอลเดียวกัน) ----
+constexpr uint8_t kPzem017DefaultAddress = kPzemChargeAddress;
 constexpr uint32_t kPzem017BaudRate = 9600;
 constexpr uint8_t kPzem017RegisterCount = 8;
 constexpr uint16_t kPzem017ResponseSize = 3 + (kPzem017RegisterCount * 2) + 2;
+// holding register / general address สำหรับอ่าน-แก้ ID (Modbus slave address)
+constexpr uint16_t kPzemRegSlaveAddress = 0x0002; // รีจิสเตอร์เก็บ ID ของอุปกรณ์
+constexpr uint8_t kPzemGeneralAddress = 0xF8;     // general address (ใช้ได้เมื่อมีอุปกรณ์ตัวเดียวบนบัส)
+constexpr uint8_t kPzemAddressMin = 0x01;
+constexpr uint8_t kPzemAddressMax = 0xF7;
 // ตั้งเป็นขา GPIO ที่ถูกต้องหาก RS485 transceiver ต้องการ DE/RE control
 constexpr int8_t kRs485DirectionPin = -1;
 
@@ -235,15 +240,19 @@ void initPzem017()
   Serial1.begin(kPzem017BaudRate, SERIAL_8N2);
 }
 
-bool readPzem017(Pzem017Reading &reading)
+bool readPzem017AtAddress(uint8_t address, Pzem017Reading &reading)
 {
   HardwareSerial &pzemPort = Serial1;
+
+  if (address < kPzemAddressMin || address > kPzemAddressMax) {
+    return false;
+  }
 
   while (pzemPort.available() > 0) {
     (void)pzemPort.read();
   }
 
-  uint8_t request[] = {kPzem017Address, 0x04, 0x00, 0x00, 0x00, kPzem017RegisterCount, 0x00, 0x00};
+  uint8_t request[] = {address, 0x04, 0x00, 0x00, 0x00, kPzem017RegisterCount, 0x00, 0x00};
   uint16_t requestCrc = crc16Modbus(request, sizeof(request) - 2);
   request[6] = static_cast<uint8_t>(requestCrc & 0xFF);
   request[7] = static_cast<uint8_t>(requestCrc >> 8);
@@ -274,7 +283,7 @@ bool readPzem017(Pzem017Reading &reading)
     return false;
   }
 
-  if (response[0] != kPzem017Address || response[1] != 0x04 || response[2] != (kPzem017RegisterCount * 2)) {
+  if (response[0] != address || response[1] != 0x04 || response[2] != (kPzem017RegisterCount * 2)) {
     return false;
   }
 
@@ -296,6 +305,11 @@ bool readPzem017(Pzem017Reading &reading)
   reading.highVoltageAlarm = reading.rawHighVoltageAlarm;
   reading.lowVoltageAlarm = reading.rawLowVoltageAlarm;
   return true;
+}
+
+bool readPzem017(Pzem017Reading &reading)
+{
+  return readPzem017AtAddress(kPzem017DefaultAddress, reading);
 }
 
 void printPzem017Reading(const Pzem017Reading &reading, float socPercent, float remainingCapacityAh)
@@ -379,4 +393,114 @@ void printPzem017ReadError()
 #else
   Serial.println(F("PZEM-017 read failed"));
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// แก้ไข / อ่าน ID (Modbus slave address) ของ PZEM-003/017
+// ---------------------------------------------------------------------------
+// เขียนค่า ID ใหม่ลง holding register 0x0002 ด้วย function 0x06 (write single
+// register) ผ่าน general address 0xF8 เพื่อให้ทำงานได้แม้ไม่ทราบ ID เดิม
+// (ใช้ได้เฉพาะเมื่อมีอุปกรณ์ตัวเดียวบนบัส RS485)
+bool setPzem017Address(uint8_t newAddress)
+{
+  if (newAddress < kPzemAddressMin || newAddress > kPzemAddressMax) {
+    return false;
+  }
+
+  HardwareSerial &pzemPort = Serial1;
+
+  while (pzemPort.available() > 0) {
+    (void)pzemPort.read();
+  }
+
+  uint8_t request[8] = {
+    kPzemGeneralAddress, 0x06,
+    static_cast<uint8_t>(kPzemRegSlaveAddress >> 8),
+    static_cast<uint8_t>(kPzemRegSlaveAddress & 0xFF),
+    0x00, newAddress, 0x00, 0x00};
+  uint16_t requestCrc = crc16Modbus(request, sizeof(request) - 2);
+  request[6] = static_cast<uint8_t>(requestCrc & 0xFF);
+  request[7] = static_cast<uint8_t>(requestCrc >> 8);
+
+  setRs485Transmit(true);
+  pzemPort.write(request, sizeof(request));
+  pzemPort.flush();
+  setRs485Transmit(false);
+
+  // function 0x06 ตอบกลับเป็น echo ของคำสั่งทั้งเฟรม
+  uint8_t response[8] = {};
+  uint32_t start = millis();
+  size_t index = 0;
+  while (index < sizeof(response) && (millis() - start) < 200U) {
+    if (pzemPort.available() > 0) {
+      response[index++] = static_cast<uint8_t>(pzemPort.read());
+    }
+  }
+
+  if (index != sizeof(response)) {
+    return false;
+  }
+
+  for (uint8_t i = 0; i < 6; ++i) {
+    if (response[i] != request[i]) {
+      return false;
+    }
+  }
+
+  uint16_t responseCrc = crc16Modbus(response, sizeof(response) - 2);
+  uint16_t receivedCrc = static_cast<uint16_t>(response[6]) |
+                         static_cast<uint16_t>(response[7] << 8);
+  return responseCrc == receivedCrc;
+}
+
+// อ่าน ID ปัจจุบันจาก holding register 0x0002 ด้วย function 0x03 (ผ่าน 0xF8)
+bool readPzem017Address(uint8_t &outAddress)
+{
+  HardwareSerial &pzemPort = Serial1;
+
+  while (pzemPort.available() > 0) {
+    (void)pzemPort.read();
+  }
+
+  uint8_t request[8] = {
+    kPzemGeneralAddress, 0x03,
+    static_cast<uint8_t>(kPzemRegSlaveAddress >> 8),
+    static_cast<uint8_t>(kPzemRegSlaveAddress & 0xFF),
+    0x00, 0x01, 0x00, 0x00};
+  uint16_t requestCrc = crc16Modbus(request, sizeof(request) - 2);
+  request[6] = static_cast<uint8_t>(requestCrc & 0xFF);
+  request[7] = static_cast<uint8_t>(requestCrc >> 8);
+
+  setRs485Transmit(true);
+  pzemPort.write(request, sizeof(request));
+  pzemPort.flush();
+  setRs485Transmit(false);
+
+  // ตอบกลับ: addr, 0x03, byteCount(2), valHi, valLo, crcLo, crcHi
+  uint8_t response[7] = {};
+  uint32_t start = millis();
+  size_t index = 0;
+  while (index < sizeof(response) && (millis() - start) < 200U) {
+    if (pzemPort.available() > 0) {
+      response[index++] = static_cast<uint8_t>(pzemPort.read());
+    }
+  }
+
+  if (index != sizeof(response)) {
+    return false;
+  }
+
+  if (response[1] != 0x03 || response[2] != 0x02) {
+    return false;
+  }
+
+  uint16_t responseCrc = crc16Modbus(response, sizeof(response) - 2);
+  uint16_t receivedCrc = static_cast<uint16_t>(response[5]) |
+                         static_cast<uint16_t>(response[6] << 8);
+  if (responseCrc != receivedCrc) {
+    return false;
+  }
+
+  outAddress = response[4]; // low byte ของค่า register = ID
+  return true;
 }
