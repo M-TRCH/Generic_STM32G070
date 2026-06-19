@@ -8,10 +8,12 @@
 #include "Sensors.h"
 #include "SocEstimator.h"
 #include "OledDisplay.h"
+#include "Storage.h"
 
 void batterySocSetup()
 {
   initBoard();
+  Wire1.begin();
 
   // PZEM-017 บนพอร์ต RS485
   initPzem017();
@@ -40,6 +42,17 @@ void batterySocSetup()
   Wire.begin();
   initOledDisplay();
   showOledMessage(F("PZEM-003 x2"), F("Display ready"));
+
+  float savedSocPercent = NAN;
+  if (loadSavedSocPercent(savedSocPercent)) {
+    initializeSocEstimator(savedSocPercent);
+    Serial.print(F("SoC loaded from EEPROM: "));
+    Serial.print(savedSocPercent, 2);
+    Serial.println(F(" %"));
+  } else {
+    initializeSocEstimator();
+    Serial.println(F("SoC EEPROM empty/invalid, estimator starts from live data"));
+  }
 }
 
 void batterySocLoop()
@@ -52,6 +65,8 @@ void batterySocLoop()
   static bool dischargeOk = false;
   static PzemReadStatus chargeStatus = PzemReadStatus::Timeout;
   static PzemReadStatus dischargeStatus = PzemReadStatus::Timeout;
+  static uint32_t lastSocSaveMs = 0;
+  static float lastSavedSocPercent = NAN;
 
   if (millis() - lastReadMs >= 500U) {
     lastReadMs = millis();
@@ -74,13 +89,36 @@ void batterySocLoop()
       }
 
       if (chargeOk || dischargeOk) {
-        const float netVoltage = chargeOk ? chargeReading.voltage : dischargeReading.voltage;
-        const float netCurrent = (dischargeOk ? dischargeReading.current : 0.0f)
-                                 - (chargeOk ? chargeReading.current : 0.0f);
-        const float socPercent = updateSocState(netVoltage, netCurrent);
+        const float socPercent = updateSocState(chargeReading, chargeOk, dischargeReading, dischargeOk);
         const float remainingCapacityAh = estimateRemainingCapacityAh(socPercent);
+        Serial.print(F("SoC boot="));
+        Serial.print(socSourceText(getSocBootSource()));
+        Serial.print(F(" live="));
+        Serial.print(socSourceText(getSocSource()));
+        Serial.print(F(" Vflt="));
+        Serial.print(getSocFilteredVoltage(), 3);
+        Serial.println(F("V"));
         printPzem017Readings(chargeReading, dischargeReading, socPercent, remainingCapacityAh);
         updateOledDisplay(chargeReading, dischargeReading, socPercent, remainingCapacityAh);
+
+        const uint32_t nowMs = millis();
+        const uint32_t saveIntervalMs = kSocSaveIntervalMinutes * kSecondsPerMinute * 1000u;
+        const bool intervalReached = (lastSocSaveMs == 0u) || ((nowMs - lastSocSaveMs) >= saveIntervalMs);
+        const bool deltaReached = !isfinite(lastSavedSocPercent)
+                                  || (fabsf(socPercent - lastSavedSocPercent) >= kSocSaveDeltaPercent);
+        const bool anchoredState = isfinite(socPercent) && (socPercent <= 0.05f || socPercent >= 99.95f);
+
+        if (isfinite(socPercent) && deltaReached && (anchoredState || intervalReached)) {
+          if (saveSavedSocPercent(socPercent)) {
+            lastSocSaveMs = nowMs;
+            lastSavedSocPercent = socPercent;
+            Serial.print(F("SoC saved to EEPROM: "));
+            Serial.print(socPercent, 2);
+            Serial.println(F(" %"));
+          } else {
+            Serial.println(F("SoC EEPROM write failed"));
+          }
+        }
       } else {
         printPzem017ReadError();
         showOledMessage(F("PZEM-003 x2"), F("Read failed"));

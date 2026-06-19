@@ -32,6 +32,10 @@ constexpr uint8_t kPzemChargeAddress = 0x01;    // PZEM ฝั่ง charge
 constexpr uint8_t kPzemDischargeAddress = 0x02; // PZEM ฝั่ง discharge
 constexpr uint8_t kPzemTargetAddress = 0x02;    // ใช้ตอนตั้ง ID ครั้งเดียว
 
+// ---- การบันทึก SoC ลง AT24C32 (ใช้ในโหมด BATTERY_SOC) ----
+constexpr uint32_t kSocSaveIntervalMinutes = 10u;
+constexpr float kSocSaveDeltaPercent = 1.0f;
+
 // ---- ขา GPIO ทั่วไป ----
 constexpr uint8_t kStatusLedPin = PA10;   // LED on-board (active HIGH)
 constexpr uint8_t kLatchTrigPin = PB3;    // Latch trigger

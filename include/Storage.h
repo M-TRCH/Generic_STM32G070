@@ -20,3 +20,7 @@ bool loadRuntimeSeconds(uint32_t &outSeconds);
 bool saveRuntimeSeconds(uint32_t seconds);
 void initRuntimeCounter();    // โหลดค่าจาก EEPROM + log ช่วงเวลาบันทึก
 void serviceRuntimeCounter(); // นับเวลาจาก RTC + เขียนลง EEPROM ตามรอบ
+
+// ---- SoC persistence ----
+bool loadSavedSocPercent(float &outSocPercent);
+bool saveSavedSocPercent(float socPercent);

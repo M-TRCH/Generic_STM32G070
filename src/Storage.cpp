@@ -11,6 +11,9 @@ constexpr uint8_t kAt24c32Address = 0x50;
 constexpr uint16_t kAt24c32RuntimeAddr = 0x0000;
 constexpr uint32_t kRuntimeMarker = 0x52554E54u; // "RUNT"
 constexpr uint8_t kRuntimeRecordSize = 12;       // marker(4) + seconds(4) + ~seconds(4)
+constexpr uint16_t kAt24c32SocAddr = 0x0010;
+constexpr uint32_t kSocMarker = 0x534F4321u;     // "SOC!"
+constexpr uint8_t kSocRecordSize = 8;            // marker(4) + soc_x100(2) + ~soc_x100(2)
 
 // runtime ใช้ RTC เป็นฐานเวลา (อิสระจาก SysTick) เพราะ NeoPixel.show() ปิด
 // interrupt นานต่อเฟรมทำให้ millis() เดินช้า → runtime คลาดเคลื่อน
@@ -38,6 +41,17 @@ void packUint32Le(uint8_t *p, uint32_t value)
   p[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
   p[2] = static_cast<uint8_t>((value >> 16) & 0xFF);
   p[3] = static_cast<uint8_t>((value >> 24) & 0xFF);
+}
+
+uint16_t unpackUint16Le(const uint8_t *p)
+{
+  return static_cast<uint16_t>(p[0]) | static_cast<uint16_t>(p[1] << 8);
+}
+
+void packUint16Le(uint8_t *p, uint16_t value)
+{
+  p[0] = static_cast<uint8_t>(value & 0xFF);
+  p[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
 }
 
 } // namespace
@@ -177,4 +191,39 @@ void serviceRuntimeCounter()
       Serial.println(F("Runtime EEPROM write failed"));
     }
   }
+}
+
+bool loadSavedSocPercent(float &outSocPercent)
+{
+  uint8_t buffer[kSocRecordSize] = {};
+  if (!eepromReadBytes(kAt24c32SocAddr, buffer, sizeof(buffer))) {
+    return false;
+  }
+
+  const uint32_t marker = unpackUint32Le(buffer);
+  const uint16_t socX100 = unpackUint16Le(buffer + 4);
+  const uint16_t check = unpackUint16Le(buffer + 6);
+
+  if (marker != kSocMarker || check != static_cast<uint16_t>(~socX100)) {
+    return false;
+  }
+
+  outSocPercent = static_cast<float>(socX100) / 100.0f;
+  return true;
+}
+
+bool saveSavedSocPercent(float socPercent)
+{
+  if (!isfinite(socPercent)) {
+    return false;
+  }
+
+  const float clampedSocPercent = constrain(socPercent, 0.0f, 100.0f);
+  const uint16_t socX100 = static_cast<uint16_t>(lroundf(clampedSocPercent * 100.0f));
+
+  uint8_t buffer[kSocRecordSize] = {};
+  packUint32Le(buffer, kSocMarker);
+  packUint16Le(buffer + 4, socX100);
+  packUint16Le(buffer + 6, static_cast<uint16_t>(~socX100));
+  return eepromWriteBytes(kAt24c32SocAddr, buffer, sizeof(buffer));
 }
