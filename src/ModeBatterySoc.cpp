@@ -45,35 +45,48 @@ void batterySocSetup()
 void batterySocLoop()
 {
   static uint32_t lastReadMs = 0;
+  static bool readChargeNext = true;
+  static Pzem017Reading chargeReading;
+  static Pzem017Reading dischargeReading;
+  static bool chargeOk = false;
+  static bool dischargeOk = false;
+  static PzemReadStatus chargeStatus = PzemReadStatus::Timeout;
+  static PzemReadStatus dischargeStatus = PzemReadStatus::Timeout;
 
-  if (millis() - lastReadMs >= 1000U) {
+  if (millis() - lastReadMs >= 500U) {
     lastReadMs = millis();
 
-    Pzem017Reading chargeReading;
-    Pzem017Reading dischargeReading;
-
-    const bool chargeOk = readPzem017AtAddress(kPzemChargeAddress, chargeReading);
-    const bool dischargeOk = readPzem017AtAddress(kPzemDischargeAddress, dischargeReading);
-
-    if (chargeOk) {
-      float remainingAh = NAN;
-      printPzem017Reading(chargeReading, NAN, remainingAh);
-    }
-    if (dischargeOk) {
-      float remainingAh = NAN;
-      printPzem017Reading(dischargeReading, NAN, remainingAh);
-    }
-
-    if (chargeOk || dischargeOk) {
-      const float netVoltage = chargeOk ? chargeReading.voltage : dischargeReading.voltage;
-      const float netCurrent = (dischargeOk ? dischargeReading.current : 0.0f)
-                               - (chargeOk ? chargeReading.current : 0.0f);
-      const float socPercent = updateSocState(netVoltage, netCurrent);
-      const float remainingCapacityAh = estimateRemainingCapacityAh(socPercent);
-      updateOledDisplay(chargeReading, dischargeReading, socPercent, remainingCapacityAh);
+    if (readChargeNext) {
+      chargeOk = readPzem017AtAddress(kPzemChargeAddress, chargeReading, &chargeStatus);
+      if (!chargeOk) {
+        Serial.print(F("PZEM charge read failed addr=0x"));
+        Serial.print(kPzemChargeAddress, HEX);
+        Serial.print(F(" reason="));
+        Serial.println(pzemReadStatusText(chargeStatus));
+      }
     } else {
-      printPzem017ReadError();
-      showOledMessage(F("PZEM-003 x2"), F("Read failed"));
+      dischargeOk = readPzem017AtAddress(kPzemDischargeAddress, dischargeReading, &dischargeStatus);
+      if (!dischargeOk) {
+        Serial.print(F("PZEM discharge read failed addr=0x"));
+        Serial.print(kPzemDischargeAddress, HEX);
+        Serial.print(F(" reason="));
+        Serial.println(pzemReadStatusText(dischargeStatus));
+      }
+
+      if (chargeOk || dischargeOk) {
+        const float netVoltage = chargeOk ? chargeReading.voltage : dischargeReading.voltage;
+        const float netCurrent = (dischargeOk ? dischargeReading.current : 0.0f)
+                                 - (chargeOk ? chargeReading.current : 0.0f);
+        const float socPercent = updateSocState(netVoltage, netCurrent);
+        const float remainingCapacityAh = estimateRemainingCapacityAh(socPercent);
+        printPzem017Readings(chargeReading, dischargeReading, socPercent, remainingCapacityAh);
+        updateOledDisplay(chargeReading, dischargeReading, socPercent, remainingCapacityAh);
+      } else {
+        printPzem017ReadError();
+        showOledMessage(F("PZEM-003 x2"), F("Read failed"));
+      }
     }
+
+    readChargeNext = !readChargeNext;
   }
 }

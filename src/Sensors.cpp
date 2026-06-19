@@ -64,6 +64,24 @@ float adcCountToVoltage(uint16_t rawAdc)
 
 } // namespace
 
+const __FlashStringHelper *pzemReadStatusText(PzemReadStatus status)
+{
+  switch (status) {
+    case PzemReadStatus::Ok:
+      return F("ok");
+    case PzemReadStatus::InvalidAddress:
+      return F("invalid_address");
+    case PzemReadStatus::Timeout:
+      return F("timeout");
+    case PzemReadStatus::CrcMismatch:
+      return F("crc_mismatch");
+    case PzemReadStatus::FrameMismatch:
+      return F("frame_mismatch");
+  }
+
+  return F("unknown");
+}
+
 // ---------------------------------------------------------------------------
 // SHT40 (บัส Wire1)
 // ---------------------------------------------------------------------------
@@ -240,11 +258,14 @@ void initPzem017()
   Serial1.begin(kPzem017BaudRate, SERIAL_8N2);
 }
 
-bool readPzem017AtAddress(uint8_t address, Pzem017Reading &reading)
+bool readPzem017AtAddress(uint8_t address, Pzem017Reading &reading, PzemReadStatus *status)
 {
   HardwareSerial &pzemPort = Serial1;
 
   if (address < kPzemAddressMin || address > kPzemAddressMax) {
+    if (status != nullptr) {
+      *status = PzemReadStatus::InvalidAddress;
+    }
     return false;
   }
 
@@ -273,6 +294,9 @@ bool readPzem017AtAddress(uint8_t address, Pzem017Reading &reading)
   }
 
   if (index != sizeof(response)) {
+    if (status != nullptr) {
+      *status = PzemReadStatus::Timeout;
+    }
     return false;
   }
 
@@ -280,10 +304,16 @@ bool readPzem017AtAddress(uint8_t address, Pzem017Reading &reading)
   uint16_t receivedCrc = static_cast<uint16_t>(response[sizeof(response) - 2]) |
                          static_cast<uint16_t>(response[sizeof(response) - 1] << 8);
   if (responseCrc != receivedCrc) {
+    if (status != nullptr) {
+      *status = PzemReadStatus::CrcMismatch;
+    }
     return false;
   }
 
   if (response[0] != address || response[1] != 0x04 || response[2] != (kPzem017RegisterCount * 2)) {
+    if (status != nullptr) {
+      *status = PzemReadStatus::FrameMismatch;
+    }
     return false;
   }
 
@@ -304,6 +334,9 @@ bool readPzem017AtAddress(uint8_t address, Pzem017Reading &reading)
   reading.energy = static_cast<float>(reading.rawEnergy);
   reading.highVoltageAlarm = reading.rawHighVoltageAlarm;
   reading.lowVoltageAlarm = reading.rawLowVoltageAlarm;
+  if (status != nullptr) {
+    *status = PzemReadStatus::Ok;
+  }
   return true;
 }
 
@@ -312,19 +345,28 @@ bool readPzem017(Pzem017Reading &reading)
   return readPzem017AtAddress(kPzem017DefaultAddress, reading);
 }
 
-void printPzem017Reading(const Pzem017Reading &reading, float socPercent, float remainingCapacityAh)
+void printPzem017Readings(const Pzem017Reading &chargeReading, const Pzem017Reading &dischargeReading,
+                          float socPercent, float remainingCapacityAh)
 {
 #if ENABLE_PYTHON_JSON_OUTPUT
-  Serial.print(F("{\"type\":\"pzem017\",\"ok\":true,\"millis\":"));
+  Serial.print(F("{\"type\":\"pzem017_pair\",\"ok\":true,\"millis\":"));
   Serial.print(millis());
-  Serial.print(F(",\"voltage\":"));
-  Serial.print(reading.voltage, 2);
+  Serial.print(F(",\"charge\":{\"voltage\":"));
+  Serial.print(chargeReading.voltage, 2);
   Serial.print(F(",\"current\":"));
-  Serial.print(reading.current, 2);
+  Serial.print(chargeReading.current, 2);
   Serial.print(F(",\"power\":"));
-  Serial.print(reading.power, 1);
+  Serial.print(chargeReading.power, 1);
   Serial.print(F(",\"energy_wh\":"));
-  Serial.print(reading.energy, 0);
+  Serial.print(chargeReading.energy, 0);
+  Serial.print(F("},\"discharge\":{\"voltage\":"));
+  Serial.print(dischargeReading.voltage, 2);
+  Serial.print(F(",\"current\":"));
+  Serial.print(dischargeReading.current, 2);
+  Serial.print(F(",\"power\":"));
+  Serial.print(dischargeReading.power, 1);
+  Serial.print(F(",\"energy_wh\":"));
+  Serial.print(dischargeReading.energy, 0);
   Serial.print(F(",\"soc_percent\":"));
   if (isfinite(socPercent)) {
     Serial.print(socPercent, 1);
@@ -337,30 +379,29 @@ void printPzem017Reading(const Pzem017Reading &reading, float socPercent, float 
   } else {
     Serial.print(F("null"));
   }
-  Serial.print(F(",\"raw_voltage\":"));
-  Serial.print(reading.rawVoltage);
-  Serial.print(F(",\"raw_current\":"));
-  Serial.print(reading.rawCurrent);
-  Serial.print(F(",\"raw_power\":"));
-  Serial.print(reading.rawPower);
-  Serial.print(F(",\"raw_energy\":"));
-  Serial.print(reading.rawEnergy);
-  Serial.print(F(",\"high_voltage_alarm\":"));
-  Serial.print(reading.highVoltageAlarm);
-  Serial.print(F(",\"low_voltage_alarm\":"));
-  Serial.print(reading.lowVoltageAlarm);
   Serial.println(F("}"));
 #else
-  Serial.print(F("PZEM-017 V="));
-  Serial.print(reading.voltage, 2);
+  Serial.print(F("CHG V="));
+  Serial.print(chargeReading.voltage, 2);
   Serial.print(F("V I="));
-  Serial.print(reading.current, 2);
+  Serial.print(chargeReading.current, 2);
   Serial.print(F("A P="));
-  Serial.print(reading.power, 1);
+  Serial.print(chargeReading.power, 1);
   Serial.print(F("W E="));
-  Serial.print(reading.energy, 0);
-  Serial.print(F("Wh SoC="));
+  Serial.print(chargeReading.energy, 0);
+  Serial.println(F("Wh"));
 
+  Serial.print(F("DSG V="));
+  Serial.print(dischargeReading.voltage, 2);
+  Serial.print(F("V I="));
+  Serial.print(dischargeReading.current, 2);
+  Serial.print(F("A P="));
+  Serial.print(dischargeReading.power, 1);
+  Serial.print(F("W E="));
+  Serial.print(dischargeReading.energy, 0);
+  Serial.println(F("Wh"));
+
+  Serial.print(F("SoC="));
   if (isfinite(socPercent)) {
     Serial.print(socPercent, 1);
     Serial.print(F("% RemAh="));
@@ -368,19 +409,6 @@ void printPzem017Reading(const Pzem017Reading &reading, float socPercent, float 
   } else {
     Serial.println(F("N/A"));
   }
-
-  Serial.print(F("RAW V="));
-  Serial.print(reading.rawVoltage);
-  Serial.print(F(" I="));
-  Serial.print(reading.rawCurrent);
-  Serial.print(F(" P="));
-  Serial.print(reading.rawPower);
-  Serial.print(F(" E="));
-  Serial.print(reading.rawEnergy);
-  Serial.print(F(" HV="));
-  Serial.print(reading.rawHighVoltageAlarm);
-  Serial.print(F(" LV="));
-  Serial.println(reading.rawLowVoltageAlarm);
 #endif
 }
 
