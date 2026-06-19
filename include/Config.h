@@ -1,0 +1,38 @@
+#pragma once
+
+#include <Arduino.h>
+
+// ---------------------------------------------------------------------------
+// เลือกโหมดการทำงาน (ครั้งละ 1 โหมดเท่านั้น ไม่สามารถเปิดพร้อมกันได้)
+//   MODE_FRIDGE_MONITOR : แสดง dashboard ตู้เย็นบนจอ TFT 3.5"
+//                         (SHT40 + SHT31 + INA180 + runtime สะสม)
+//   MODE_BATTERY_SOC    : คำนวณ SoC แบตเตอรี่ (PZEM-017) แสดงบนจอ OLED
+//
+// วิธีเพิ่มโหมดในอนาคต: เพิ่ม #define MODE_xxx ค่าใหม่ + ไฟล์ Mode<xxx>.{h,cpp}
+// แล้ว dispatch เพิ่มใน main.cpp
+// ---------------------------------------------------------------------------
+#define MODE_FRIDGE_MONITOR 1
+#define MODE_BATTERY_SOC    2
+
+#ifndef OPERATING_MODE
+#define OPERATING_MODE MODE_BATTERY_SOC
+#endif
+
+// เปิด/ปิดรูปแบบ output แบบ JSON สำหรับ python logger (ใช้ในโหมด BATTERY_SOC)
+#ifndef ENABLE_PYTHON_JSON_OUTPUT
+#define ENABLE_PYTHON_JSON_OUTPUT 0
+#endif
+
+// ---- ขา GPIO ทั่วไป ----
+constexpr uint8_t kStatusLedPin = PA10;   // LED on-board (active HIGH)
+constexpr uint8_t kLatchTrigPin = PB3;    // Latch trigger
+constexpr uint8_t kLatchUnlockPin = PA3;  // Latch unlock (active LOW)
+
+// ---- ขา/ความเร็ว Debug serial ----
+constexpr uint8_t kDebugSerialRxPin = PA15;
+constexpr uint8_t kDebugSerialTxPin = PA2;
+constexpr uint32_t kDebugSerialBaud = 115200;
+
+// ---- บัส I2C ที่ใช้ร่วม (OLED + SHT31) : Wire ----
+constexpr uint8_t kWireSdaPin = PA12;
+constexpr uint8_t kWireSclPin = PB13;

@@ -4,6 +4,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+# Example command to run this script:
+# python plot_pzem_log.py --log-type discharge --output plot.png
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 DEFAULT_LOG_DIR = Path(__file__).resolve().parent / "log"
