@@ -345,12 +345,52 @@ bool readPzem017(Pzem017Reading &reading)
   return readPzem017AtAddress(kPzem017DefaultAddress, reading);
 }
 
+namespace {
+
+void printDurationHours(float hoursValue)
+{
+  if (!isfinite(hoursValue) || hoursValue < 0.0f) {
+    Serial.print(F("N/A"));
+    return;
+  }
+
+  const uint32_t totalMinutes = static_cast<uint32_t>(hoursValue * 60.0f);
+  const uint32_t hours = totalMinutes / 60u;
+  const uint32_t minutes = totalMinutes % 60u;
+
+  Serial.print(hours);
+  Serial.print(F("h "));
+  Serial.print(minutes);
+  Serial.print(F("m"));
+}
+
+} // namespace
+
 void printPzem017Readings(const Pzem017Reading &chargeReading, const Pzem017Reading &dischargeReading,
-                          float socPercent, float remainingCapacityAh)
+                          float socPercent, float remainingCapacityAh,
+                          float timeRemainingHours, float timeToFullHours,
+                          const __FlashStringHelper *bootSourceText,
+                          const __FlashStringHelper *liveSourceText,
+                          float filteredVoltageV,
+                          const __FlashStringHelper *chargeStateText,
+                          const __FlashStringHelper *dischargeStateText,
+                          bool degradedMode)
 {
 #if ENABLE_PYTHON_JSON_OUTPUT
   Serial.print(F("{\"type\":\"pzem017_pair\",\"ok\":true,\"millis\":"));
   Serial.print(millis());
+  Serial.print(F(",\"boot_source\":\""));
+  Serial.print(bootSourceText);
+  Serial.print(F("\",\"live_source\":\""));
+  Serial.print(liveSourceText);
+  Serial.print(F("\",\"filtered_voltage_v\":"));
+  if (isfinite(filteredVoltageV)) {
+    Serial.print(filteredVoltageV, 3);
+  } else {
+    Serial.print(F("null"));
+  }
+  Serial.print(F(",\"degraded_mode\":"));
+  Serial.print(degradedMode ? F("true") : F("false"));
   Serial.print(F(",\"charge\":{\"voltage\":"));
   Serial.print(chargeReading.voltage, 2);
   Serial.print(F(",\"current\":"));
@@ -359,7 +399,9 @@ void printPzem017Readings(const Pzem017Reading &chargeReading, const Pzem017Read
   Serial.print(chargeReading.power, 1);
   Serial.print(F(",\"energy_wh\":"));
   Serial.print(chargeReading.energy, 0);
-  Serial.print(F("},\"discharge\":{\"voltage\":"));
+  Serial.print(F(",\"state\":\""));
+  Serial.print(chargeStateText);
+  Serial.print(F("\"},\"discharge\":{\"voltage\":"));
   Serial.print(dischargeReading.voltage, 2);
   Serial.print(F(",\"current\":"));
   Serial.print(dischargeReading.current, 2);
@@ -367,7 +409,9 @@ void printPzem017Readings(const Pzem017Reading &chargeReading, const Pzem017Read
   Serial.print(dischargeReading.power, 1);
   Serial.print(F(",\"energy_wh\":"));
   Serial.print(dischargeReading.energy, 0);
-  Serial.print(F(",\"soc_percent\":"));
+  Serial.print(F(",\"state\":\""));
+  Serial.print(dischargeStateText);
+  Serial.print(F("\"},\"soc_percent\":"));
   if (isfinite(socPercent)) {
     Serial.print(socPercent, 1);
   } else {
@@ -376,6 +420,18 @@ void printPzem017Readings(const Pzem017Reading &chargeReading, const Pzem017Read
   Serial.print(F(",\"remaining_ah\":"));
   if (isfinite(remainingCapacityAh)) {
     Serial.print(remainingCapacityAh, 1);
+  } else {
+    Serial.print(F("null"));
+  }
+  Serial.print(F(",\"time_remaining_h\":"));
+  if (isfinite(timeRemainingHours)) {
+    Serial.print(timeRemainingHours, 3);
+  } else {
+    Serial.print(F("null"));
+  }
+  Serial.print(F(",\"time_to_full_h\":"));
+  if (isfinite(timeToFullHours)) {
+    Serial.print(timeToFullHours, 3);
   } else {
     Serial.print(F("null"));
   }
@@ -405,7 +461,12 @@ void printPzem017Readings(const Pzem017Reading &chargeReading, const Pzem017Read
   if (isfinite(socPercent)) {
     Serial.print(socPercent, 1);
     Serial.print(F("% RemAh="));
-    Serial.println(remainingCapacityAh, 1);
+    Serial.print(remainingCapacityAh, 1);
+    Serial.print(F(" T_rem="));
+    printDurationHours(timeRemainingHours);
+    Serial.print(F(" T_full="));
+    printDurationHours(timeToFullHours);
+    Serial.println();
   } else {
     Serial.println(F("N/A"));
   }

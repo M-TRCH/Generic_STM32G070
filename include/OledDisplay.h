@@ -11,4 +11,8 @@ void showOledMessage(const __FlashStringHelper *line1, const __FlashStringHelper
 
 // แสดงค่าจาก PZEM-003/017 สองตัว + SoC (โหมด BATTERY_SOC)
 void updateOledDisplay(const Pzem017Reading &chargeReading, const Pzem017Reading &dischargeReading,
-					   float socPercent, float remainingCapacityAh);
+					   float socPercent, float remainingCapacityAh,
+					   float timeRemainingHours, float timeToFullHours,
+					   bool chargeAvailable, bool dischargeAvailable,
+					   bool chargeStale, bool dischargeStale,
+					   bool degradedMode);

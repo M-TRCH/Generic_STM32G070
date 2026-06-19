@@ -72,7 +72,14 @@ void initPzem017();
 bool readPzem017AtAddress(uint8_t address, Pzem017Reading &reading, PzemReadStatus *status = nullptr);
 bool readPzem017(Pzem017Reading &reading);
 void printPzem017Readings(const Pzem017Reading &chargeReading, const Pzem017Reading &dischargeReading,
-                          float socPercent, float remainingCapacityAh);
+                          float socPercent, float remainingCapacityAh,
+                          float timeRemainingHours, float timeToFullHours,
+                          const __FlashStringHelper *bootSourceText,
+                          const __FlashStringHelper *liveSourceText,
+                          float filteredVoltageV,
+                          const __FlashStringHelper *chargeStateText,
+                          const __FlashStringHelper *dischargeStateText,
+                          bool degradedMode);
 void printPzem017ReadError();
 
 // แก้ไข/อ่าน ID (Modbus slave address) ของ PZEM-003/017
