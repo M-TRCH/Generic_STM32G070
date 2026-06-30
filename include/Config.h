@@ -20,7 +20,7 @@
 
 // เปิด/ปิดรูปแบบ output แบบ JSON สำหรับ python logger (ใช้ในโหมด BATTERY_SOC)
 #ifndef ENABLE_PYTHON_JSON_OUTPUT
-#define ENABLE_PYTHON_JSON_OUTPUT 0
+#define ENABLE_PYTHON_JSON_OUTPUT 1
 #endif
 
 // ตั้ง 1 เพื่อแก้ ID (Modbus address) ของ PZEM-003/017 เป็น kPzemTargetAddress

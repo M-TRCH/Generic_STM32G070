@@ -16,6 +16,42 @@ constexpr uint8_t kSensorStaleThreshold = 2;
 constexpr uint8_t kSensorFaultThreshold = 3;
 constexpr uint8_t kSensorRecoverThreshold = 2;
 constexpr float kBatteryCapacityAh = 18.0f;
+constexpr size_t kTimeEstimateAverageWindow = 900;
+
+struct MovingAverageFilter {
+  float samples[kTimeEstimateAverageWindow] = {};
+  size_t nextIndex = 0;
+  size_t count = 0;
+  float sum = 0.0f;
+
+  void reset()
+  {
+    nextIndex = 0;
+    count = 0;
+    sum = 0.0f;
+  }
+
+  float update(float sample)
+  {
+    if (!isfinite(sample)) {
+      reset();
+      return NAN;
+    }
+
+    if (count < kTimeEstimateAverageWindow) {
+      samples[nextIndex] = sample;
+      sum += sample;
+      ++count;
+    } else {
+      sum -= samples[nextIndex];
+      samples[nextIndex] = sample;
+      sum += sample;
+    }
+
+    nextIndex = (nextIndex + 1u) % kTimeEstimateAverageWindow;
+    return sum / static_cast<float>(count);
+  }
+};
 
 void printBatteryJsonEvent(const __FlashStringHelper *eventName,
                            const __FlashStringHelper *statusText,
@@ -211,6 +247,8 @@ void batterySocLoop()
   static float lastSavedSocPercent = NAN;
   static float heldSocPercent = NAN;
   static float heldRemainingCapacityAh = NAN;
+  static MovingAverageFilter timeRemainingAverage;
+  static MovingAverageFilter timeToFullAverage;
 
   if (millis() - lastReadMs >= 500U) {
     lastReadMs = millis();
@@ -291,6 +329,8 @@ void batterySocLoop()
         float remainingCapacityAh = heldRemainingCapacityAh;
         float timeRemainingHours = NAN;
         float timeToFullHours = NAN;
+        float rawTimeRemainingHours = NAN;
+        float rawTimeToFullHours = NAN;
         const __FlashStringHelper *liveSourceText = nullptr;
         const __FlashStringHelper *chargeStateText = nullptr;
         const __FlashStringHelper *dischargeStateText = nullptr;
@@ -308,12 +348,15 @@ void batterySocLoop()
         const float missingCapacityAh = isfinite(remainingCapacityAh) ? max(0.0f, kBatteryCapacityAh - remainingCapacityAh) : NAN;
 
         if (canUpdateSoc && isfinite(remainingCapacityAh) && netDischargeCurrentA > 0.05f) {
-          timeRemainingHours = remainingCapacityAh / netDischargeCurrentA;
+          rawTimeRemainingHours = remainingCapacityAh / netDischargeCurrentA;
         }
 
         if (canUpdateSoc && isfinite(missingCapacityAh) && netDischargeCurrentA < -0.05f) {
-          timeToFullHours = missingCapacityAh / (-netDischargeCurrentA);
+          rawTimeToFullHours = missingCapacityAh / (-netDischargeCurrentA);
         }
+
+        timeRemainingHours = timeRemainingAverage.update(rawTimeRemainingHours);
+        timeToFullHours = timeToFullAverage.update(rawTimeToFullHours);
 
         if (degradedMode) {
           liveSourceText = F("sensor_degraded");
