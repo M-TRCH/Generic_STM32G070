@@ -1,5 +1,4 @@
 #include <Arduino.h>
-
 #include "Config.h"
 
 // ---------------------------------------------------------------------------
@@ -9,8 +8,10 @@
 #include "ModeFridgeMonitor.h"
 #elif OPERATING_MODE == MODE_BATTERY_SOC
 #include "ModeBatterySoc.h"
+#elif OPERATING_MODE == MODE_HEAD_NODE
+#include "ModeHeadNode.h"
 #else
-#error "OPERATING_MODE ไม่ถูกต้อง: กรุณาเลือก MODE_FRIDGE_MONITOR หรือ MODE_BATTERY_SOC ใน include/Config.h"
+#error "OPERATING_MODE ไม่ถูกต้อง: กรุณาเลือก MODE_FRIDGE_MONITOR, MODE_BATTERY_SOC หรือ MODE_HEAD_NODE ใน include/Config.h"
 #endif
 
 void setup()
@@ -19,6 +20,8 @@ void setup()
   fridgeMonitorSetup();
 #elif OPERATING_MODE == MODE_BATTERY_SOC
   batterySocSetup();
+#elif OPERATING_MODE == MODE_HEAD_NODE
+  headNodeSetup();
 #endif
 }
 
@@ -28,5 +31,7 @@ void loop()
   fridgeMonitorLoop();
 #elif OPERATING_MODE == MODE_BATTERY_SOC
   batterySocLoop();
+#elif OPERATING_MODE == MODE_HEAD_NODE
+  headNodeLoop();
 #endif
 }

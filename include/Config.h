@@ -7,15 +7,17 @@
 //   MODE_FRIDGE_MONITOR : แสดง dashboard ตู้เย็นบนจอ TFT 3.5"
 //                         (SHT40 + SHT31 + INA180 + runtime สะสม)
 //   MODE_BATTERY_SOC    : คำนวณ SoC แบตเตอรี่ (PZEM-017) แสดงบนจอ OLED
+//   MODE_HEAD_NODE      : หัวโหนดสำหรับงาน Node + Gateway
 //
 // วิธีเพิ่มโหมดในอนาคต: เพิ่ม #define MODE_xxx ค่าใหม่ + ไฟล์ Mode<xxx>.{h,cpp}
 // แล้ว dispatch เพิ่มใน main.cpp
 // ---------------------------------------------------------------------------
 #define MODE_FRIDGE_MONITOR 1
 #define MODE_BATTERY_SOC    2
+#define MODE_HEAD_NODE      3
 
 #ifndef OPERATING_MODE
-#define OPERATING_MODE MODE_BATTERY_SOC
+#define OPERATING_MODE MODE_HEAD_NODE
 #endif
 
 // เปิด/ปิดรูปแบบ output แบบ JSON สำหรับ python logger (ใช้ในโหมด BATTERY_SOC)
@@ -49,3 +51,18 @@ constexpr uint32_t kDebugSerialBaud = 115200;
 // ---- บัส I2C ที่ใช้ร่วม (OLED + SHT31) : Wire ----
 constexpr uint8_t kWireSdaPin = PA12;
 constexpr uint8_t kWireSclPin = PB13;
+
+// ---- SPI / Ethernet (W5500) สำหรับโหมด HEAD_NODE ----
+constexpr uint8_t kSpiSckPin = PA5;
+constexpr uint8_t kSpiMisoPin = PB4;
+constexpr uint8_t kSpiMosiPin = PB5;
+constexpr uint8_t kW5500CsPin = PB15;
+
+constexpr uint8_t kHeadNodeMacAddress[6] = {0x02, 0x47, 0x07, 0x00, 0x00, 0x10};
+constexpr uint32_t kHeadNodeMqttReconnectDelayMs = 5000UL;
+constexpr uint32_t kHeadNodeMqttPublishIntervalMs = 10000UL;
+constexpr uint16_t kHeadNodeMqttBrokerPort = 1883;
+constexpr char kHeadNodeMqttBrokerHost[] = "192.168.0.99";
+constexpr char kHeadNodeMqttClientId[] = "stm32g070-head-node";
+constexpr char kHeadNodeMqttPublishTopic[] = "cab01/row01/col01/test/pub";
+constexpr char kHeadNodeMqttSubscribeTopic[] = "cab01/row01/col01/test/sub";
