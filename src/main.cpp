@@ -10,8 +10,10 @@
 #include "ModeBatterySoc.h"
 #elif OPERATING_MODE == MODE_HEAD_NODE
 #include "ModeHeadNode.h"
+#elif OPERATING_MODE == MODE_TCP_SOCKET_SERVER
+#include "ModeTcpSocketServer.h"
 #else
-#error "OPERATING_MODE ไม่ถูกต้อง: กรุณาเลือก MODE_FRIDGE_MONITOR, MODE_BATTERY_SOC หรือ MODE_HEAD_NODE ใน include/Config.h"
+#error "OPERATING_MODE ไม่ถูกต้อง: กรุณาเลือก MODE_FRIDGE_MONITOR, MODE_BATTERY_SOC, MODE_HEAD_NODE หรือ MODE_TCP_SOCKET_SERVER ใน include/Config.h"
 #endif
 
 void setup()
@@ -22,6 +24,8 @@ void setup()
   batterySocSetup();
 #elif OPERATING_MODE == MODE_HEAD_NODE
   headNodeSetup();
+#elif OPERATING_MODE == MODE_TCP_SOCKET_SERVER
+  tcpSocketServerSetup();
 #endif
 }
 
@@ -33,5 +37,8 @@ void loop()
   batterySocLoop();
 #elif OPERATING_MODE == MODE_HEAD_NODE
   headNodeLoop();
+#elif OPERATING_MODE == MODE_TCP_SOCKET_SERVER
+  tcpSocketServerLoop();
 #endif
 }
+
